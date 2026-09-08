@@ -663,7 +663,14 @@ function SourcingDashboard() {
                           <td className="text-right tabular-nums whitespace-nowrap">
                             <span className="text-ink font-medium">{r.indexedCount}</span> <span className="text-mute">/ {r.resultCount}</span>
                           </td>
-                          <td className="text-mute text-body-xs">{r.provider === 'none' ? '—' : r.provider}</td>
+                          <td className="text-mute text-body-xs">
+                            {r.provider === 'none' ? '—' : r.provider}
+                            {r.notice && (
+                              <span className="block text-faint" title={r.notice}>
+                                {r.notice.length > 44 ? `${r.notice.slice(0, 44)}…` : r.notice}
+                              </span>
+                            )}
+                          </td>
                           <td className="text-right text-mute tabular-nums text-body-xs whitespace-nowrap">
                             {r.pagesFetched || '—'} · {r.creditsUsed || 0}
                           </td>

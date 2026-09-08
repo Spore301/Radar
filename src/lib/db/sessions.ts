@@ -153,7 +153,10 @@ export async function getSession(id: string): Promise<SessionDetail | null> {
       indexedCount: q.keptCount,
       pagesFetched: q.creditCost > 0 ? q.creditCost : q.outcome === 'fetched' ? 1 : 0,
       creditsUsed: q.creditCost,
-      error: q.errorMessage ?? undefined,
+      // errorMessage doubles as the diagnostic column: a failure reason when the
+      // query failed, the engine's account of the result set when it succeeded.
+      error: q.outcome === 'fetched' ? undefined : q.errorMessage ?? undefined,
+      notice: q.outcome === 'fetched' ? q.errorMessage ?? undefined : undefined,
     }));
     const strong = candidates.filter((c) => c.match_score >= 70).length;
     const potential = candidates.filter((c) => c.match_score >= 40 && c.match_score < 70).length;
@@ -272,7 +275,7 @@ export async function recordSearchRun(
           creditCost: q.creditsUsed,
           resultCount: q.resultCount,
           keptCount: q.indexedCount,
-          errorMessage: q.error ?? null,
+          errorMessage: q.error ?? q.notice ?? null,
           startedAt: now,
           finishedAt: now,
         })),

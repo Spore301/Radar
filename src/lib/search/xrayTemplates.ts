@@ -41,7 +41,7 @@ export interface QueryTerms {
   location_terms: string[];
   /** Whether 'Remote' should be OR'd into location clauses. */
   remote: boolean;
-  /** Country-code TLD for the Xing geo-domain variant, e.g. '.de'. */
+  /** Country-code TLD for the geo-domain variant, e.g. '.de'. Empty when the location maps to no country — the variant is then skipped. */
   geo_tld: string;
   /**
    * Phrases from the recruiter's additional details that every profile must
@@ -118,13 +118,24 @@ export function isSoftSkill(skill: string): boolean {
  * with its synonyms. Capped at 3 skills — Google silently truncates long
  * queries and a 5-way AND on a profile page returns almost nothing.
  */
-export function skillsClause(t: QueryTerms, max = 3): string {
-  const skills = uniq(t.must_have_skills).slice(0, max);
+export function skillsClause(t: QueryTerms, max = 2): string {
+  const skills = uniq(t.must_have_skills);
   if (skills.length === 0) return '';
-  // One synonym per skill keeps the whole string near Google's 32-word ceiling.
-  const groups = skills.map((skill) => orGroup([skill, ...(t.skill_synonyms?.[skill] ?? [])], 2));
+
+  // A "skill" of three or more words is a descriptor, not a keyword — an LLM
+  // produces things like "AI productivity systems". Requiring several of those
+  // on one profile page matches nobody, so they become alternatives instead.
+  const phrasey = skills.filter((sk) => sk.trim().split(/\s+/).length >= 3);
+  if (phrasey.length > 1) {
+    return orGroup(skills, 4);
+  }
+
+  // Short, concrete skills are genuinely non-negotiable, so they stay AND'd —
+  // but two is the ceiling. Three exact terms on one page is where recall dies.
+  const groups = skills.slice(0, max).map((skill) => orGroup([skill, ...(t.skill_synonyms?.[skill] ?? [])], 2));
   if (groups.length === 1) return groups[0].startsWith('(') ? groups[0] : `(${groups[0]})`;
-  return `(${groups.join(' AND ')})`;
+  // Space is AND in Google; an explicit AND between groups parses unreliably.
+  return groups.join(' ');
 }
 
 /** Skills as topics (OR'd) — for pages where any one signal is enough. */
@@ -247,17 +258,17 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     platform: 'LinkedIn',
     label: 'Broad profile search',
     pattern:
-      'site:linkedin.com/in/ ({role synonyms, OR\'d}) AND ({must-have skills}) {location} -intitle:job -intitle:hiring -recruiter',
+      'site:linkedin.com/in/ ({role synonyms, OR\'d}) AND ({must-have skills}) {location} -intitle:job -intitle:hiring -intitle:recruiter',
     expected_result_type: 'Profile',
     intent: (t) => `Broad LinkedIn sweep for ${t.role_synonyms[0] ?? 'the role'} profiles with the must-have skills.`,
     build: (t) =>
       join(
         'site:linkedin.com/in/',
         rolesClause(t),
-        topicClause(t) && `AND ${topicClause(t)}`,
+        topicClause(t),
         requiredClause(t),
         locationClause(t),
-        '-intitle:job -intitle:hiring -recruiter',
+        '-intitle:job -intitle:hiring -intitle:recruiter',
         excludeClause(t)
       ),
   },
@@ -265,16 +276,16 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'linkedin_title',
     platform: 'LinkedIn',
     label: 'Title-anchored (narrow)',
-    pattern: 'site:linkedin.com/in/ intitle:({role synonyms}) AND ({must-have skills}) -intitle:job -intitle:hiring -recruiter',
+    pattern: 'site:linkedin.com/in/ intitle:({role synonyms}) AND ({must-have skills}) -intitle:job -intitle:hiring -intitle:recruiter',
     expected_result_type: 'Profile',
     intent: (t) => `LinkedIn profiles whose headline carries the ${t.role_synonyms[0] ?? 'role'} title.`,
     build: (t) =>
       join(
         'site:linkedin.com/in/',
         `intitle:${baseRolesClause(t)}`,
-        topicClause(t) && `AND ${topicClause(t)}`,
+        topicClause(t),
         requiredClause(t),
-        '-intitle:job -intitle:hiring -recruiter',
+        '-intitle:job -intitle:hiring -intitle:recruiter',
         excludeClause(t)
       ),
   },
@@ -290,7 +301,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
         ? join(
             'site:linkedin.com/in/',
             `${quote(t.seniority_term)} AROUND(5) ${baseRolesClause(t)}`,
-            topicClause(t) && `AND ${topicClause(t)}`,
+            topicClause(t),
             requiredClause(t),
             excludeClause(t)
           )
@@ -320,7 +331,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
         : join(
         'site:github.com',
         skillsClause(t),
-        orGroup(t.role_adjacent_terms, 4) && `AND ${orGroup(t.role_adjacent_terms, 4)}`,
+        orGroup(t.role_adjacent_terms, 4),
         requiredClause(t),
         '-intitle:job',
         excludeClause(t)
@@ -368,7 +379,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     pattern: 'site:wellfound.com ({role synonyms}) AND ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: (t) => `Startup-minded ${t.role_synonyms[0] ?? 'candidates'} on Wellfound.`,
-    build: (t) => join('site:wellfound.com', rolesClause(t), topicClause(t) && `AND ${topicClause(t)}`, requiredClause(t), locationClause(t), excludeClause(t)),
+    build: (t) => join('site:wellfound.com', rolesClause(t), topicClause(t), requiredClause(t), locationClause(t), excludeClause(t)),
   },
 
   // Behance ------------------------------------------------------------------
@@ -379,7 +390,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     pattern: 'site:behance.net ({discipline, e.g. "UI Design" OR "Brand Identity"}) AND ({must-have skills})',
     expected_result_type: 'Portfolio',
     intent: (t) => `Behance portfolios in ${t.discipline_terms.slice(0, 2).join(' / ') || 'the discipline'}.`,
-    build: (t) => join('site:behance.net', orGroup(t.discipline_terms, 4), topicClause(t) && `AND ${topicClause(t)}`, requiredClause(t), excludeClause(t)),
+    build: (t) => join('site:behance.net', orGroup(t.discipline_terms, 4), topicClause(t), requiredClause(t), excludeClause(t)),
   },
 
   // Dribbble -----------------------------------------------------------------
@@ -390,7 +401,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     pattern: 'site:dribbble.com ({discipline}) AND ({must-have skills})',
     expected_result_type: 'Portfolio',
     intent: (t) => `Dribbble designers working in ${t.discipline_terms.slice(0, 2).join(' / ') || 'the discipline'}.`,
-    build: (t) => join('site:dribbble.com', orGroup(t.discipline_terms, 4), topicClause(t) && `AND ${topicClause(t)}`, requiredClause(t), excludeClause(t)),
+    build: (t) => join('site:dribbble.com', orGroup(t.discipline_terms, 4), topicClause(t), requiredClause(t), excludeClause(t)),
   },
 
   // Xing ---------------------------------------------------------------------
@@ -401,7 +412,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     pattern: 'site:xing.com/profile ({role synonyms, local language if relevant}) AND ({must-have skills})',
     expected_result_type: 'Profile',
     intent: (t) => `Xing profiles for ${t.role_synonyms[0] ?? 'the role'} across the DACH region.`,
-    build: (t) => join('site:xing.com/profile', rolesClause(t), topicClause(t) && `AND ${topicClause(t)}`, requiredClause(t), excludeClause(t)),
+    build: (t) => join('site:xing.com/profile', rolesClause(t), topicClause(t), requiredClause(t), excludeClause(t)),
   },
   {
     id: 'xing_geo',
@@ -409,8 +420,9 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     label: 'Geo-domain variant',
     pattern: 'site:.de ({role synonyms}) AND ({must-have skills})',
     expected_result_type: 'Profile',
-    intent: (t) => `Country-domain (${t.geo_tld}) pages mentioning the role and skills.`,
-    build: (t) => join(`site:${t.geo_tld || '.de'}`, rolesClause(t), topicClause(t) && `AND ${topicClause(t)}`, requiredClause(t), excludeClause(t)),
+    intent: (t) => `Country-domain (${t.geo_tld || 'none for this location'}) pages mentioning the role and skills.`,
+    build: (t) =>
+      t.geo_tld ? join(`site:${t.geo_tld}`, rolesClause(t), topicClause(t), requiredClause(t), excludeClause(t)) : null,
   },
 
   // Resumes / CVs (open web) -------------------------------------------------
@@ -426,7 +438,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
       join(
         'filetype:pdf',
         rolesClause(t),
-        topicClause(t) && `AND ${topicClause(t)}`,
+        topicClause(t),
         requiredClause(t),
         '("resume" OR "CV" OR "curriculum vitae")',
         locationClause(t),
@@ -455,8 +467,8 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     build: (t) =>
       join(
         '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users)',
-        `AND ${rolesClause(t)}`,
-        topicClause(t) && `AND ${topicClause(t)}`,
+        rolesClause(t),
+        topicClause(t),
         requiredClause(t),
         excludeClause(t)
       ),
@@ -550,16 +562,29 @@ const LOCATION_ALIASES: Record<string, string[]> = {
 };
 
 const GEO_TLDS: Array<[RegExp, string]> = [
-  [/germany|berlin|munich|münchen|hamburg|frankfurt|deutschland/i, '.de'],
-  [/austria|vienna|wien|österreich/i, '.at'],
-  [/switzerland|zurich|zürich|geneva|schweiz/i, '.ch'],
-  [/united kingdom|\buk\b|london|manchester|england/i, '.co.uk'],
-  [/india|bangalore|bengaluru|mumbai|delhi|hyderabad|pune|chennai|gurgaon|noida/i, '.in'],
-  [/netherlands|amsterdam/i, '.nl'],
-  [/france|paris/i, '.fr'],
+  [/germany|berlin|munich|münchen|hamburg|frankfurt|cologne|köln|stuttgart|düsseldorf|deutschland/i, '.de'],
+  [/austria|vienna|wien|salzburg|graz|österreich/i, '.at'],
+  [/switzerland|zurich|zürich|geneva|genève|basel|bern|lausanne|schweiz/i, '.ch'],
+  [/united kingdom|\buk\b|london|manchester|birmingham|leeds|glasgow|edinburgh|bristol|england|scotland|wales/i, '.co.uk'],
+  [
+    /india|bangalore|bengaluru|mumbai|bombay|delhi|\bncr\b|hyderabad|pune|chennai|madras|gurgaon|gurugram|noida|kolkata|calcutta|west bengal|ahmedabad|jaipur|kochi|cochin|coimbatore|indore|lucknow|nagpur|surat|chandigarh|bhubaneswar|vadodara|mysore|mysuru|thiruvananthapuram|trivandrum|visakhapatnam|goa/i,
+    '.in',
+  ],
+  [/netherlands|amsterdam|rotterdam|utrecht|eindhoven/i, '.nl'],
+  [/france|paris|lyon|marseille|toulouse|bordeaux/i, '.fr'],
   [/singapore/i, '.sg'],
-  [/australia|sydney|melbourne/i, '.com.au'],
-  [/canada|toronto|vancouver/i, '.ca'],
+  [/australia|sydney|melbourne|brisbane|perth/i, '.com.au'],
+  [/canada|toronto|vancouver|montreal|montréal|ottawa|calgary/i, '.ca'],
+  [/ireland|dublin/i, '.ie'],
+  [/spain|madrid|barcelona|valencia/i, '.es'],
+  [/italy|milan|milano|rome|roma|turin/i, '.it'],
+  [/poland|warsaw|kraków|krakow|wrocław/i, '.pl'],
+  [/sweden|stockholm|gothenburg/i, '.se'],
+  [/brazil|são paulo|sao paulo|rio de janeiro/i, '.com.br'],
+  [/\buae\b|dubai|abu dhabi|emirates/i, '.ae'],
+  [/south africa|johannesburg|cape town/i, '.co.za'],
+  [/new zealand|auckland|wellington/i, '.co.nz'],
+  [/japan|tokyo|osaka/i, '.co.jp'],
 ];
 
 const SENIORITY_TERM: Record<SeniorityLevel | 'Any', string | null> = {
@@ -763,7 +788,9 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
   const city = location.split(',')[0].trim();
   const location_terms = city && !/^remote$/i.test(city) ? uniq([city, ...(LOCATION_ALIASES[city.toLowerCase()] ?? [])]) : [];
 
-  const geo_tld = GEO_TLDS.find(([re]) => re.test(location))?.[1] ?? '.de';
+  // No match means no country-domain query. Defaulting to '.de' used to send a
+  // Kolkata search sweeping German domains and burn a credit on it.
+  const geo_tld = GEO_TLDS.find(([re]) => re.test(location))?.[1] ?? '';
   const details = parseAdditionalDetails(constraints.additional_details ?? constraints.soft_constraints);
 
   return {

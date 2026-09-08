@@ -41,6 +41,13 @@ export interface SerpQueryOutcome {
   creditsUsed: number;
   /** Set when every provider failed (or the only configured one errored). */
   error?: string;
+  /**
+   * What the engine said about the result set — Google's own explanation for
+   * an empty page ("Fully empty", a spelling fix, a total-results estimate).
+   * Captured so a 0-result query can explain itself in the run receipt
+   * instead of being indistinguishable from a silently dropped one.
+   */
+  notice?: string;
 }
 
 export interface SerpApiKeys {
@@ -52,6 +59,31 @@ interface SerpApiPage {
   results: RawSearchResult[];
   /** True when SerpAPI advertised a next page. */
   hasNext: boolean;
+  /** Human-readable summary of `search_information` — why the page looks the way it does. */
+  notice?: string;
+}
+
+/**
+ * Turns SerpAPI's `search_information` into one short line. This is the only
+ * thing that distinguishes "Google genuinely has nothing for this string"
+ * from "Google returned results and we dropped them".
+ */
+function describeSearchInformation(data: any): string | undefined {
+  const si = data?.search_information ?? {};
+  const parts: string[] = [];
+  if (typeof si.organic_results_state === 'string' && si.organic_results_state.trim()) {
+    parts.push(si.organic_results_state.trim());
+  }
+  if (typeof si.total_results === 'number') {
+    parts.push(`${si.total_results.toLocaleString('en-US')} total results`);
+  }
+  if (typeof si.spelling_fix === 'string' && si.spelling_fix.trim()) {
+    parts.push(`Google corrected the spelling to "${si.spelling_fix.trim()}"`);
+  }
+  if (typeof data?.search_metadata?.status === 'string' && data.search_metadata.status !== 'Success') {
+    parts.push(`status ${data.search_metadata.status}`);
+  }
+  return parts.length ? parts.join(' · ') : undefined;
 }
 
 async function fetchSerpApiPage(
@@ -100,7 +132,11 @@ async function fetchSerpApiPage(
       thumbnail: typeof item.thumbnail === 'string' ? item.thumbnail : null,
     }));
 
-  return { results, hasNext: Boolean(data.serpapi_pagination?.next || data.pagination?.next) };
+  return {
+    results,
+    hasNext: Boolean(data.serpapi_pagination?.next || data.pagination?.next),
+    notice: describeSearchInformation(data),
+  };
 }
 
 /**
@@ -131,12 +167,13 @@ async function searchWithSerpApi(
 
   // Page 1: ask for 100. If the engine honours it we're done in one credit.
   const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, 100);
+  const notice = first.notice;
   pages = 1;
   absorb(first.results);
   // Page counts wobble (9 or 11 with filter=0), so "more than a page" is the
   // only length signal we trust; otherwise SerpAPI's own next-page link decides.
   if (first.results.length > SERP_PAGE_SIZE || first.results.length === 0 || !first.hasNext) {
-    return { results: all, pagesFetched: pages, creditsUsed: pages };
+    return { results: all, pagesFetched: pages, creditsUsed: pages, notice };
   }
 
   // Google gave one ~10-result page: walk the rest with `start`.
@@ -147,7 +184,7 @@ async function searchWithSerpApi(
     if (added === 0 || !page.hasNext) break;
   }
 
-  return { results: all, pagesFetched: pages, creditsUsed: pages };
+  return { results: all, pagesFetched: pages, creditsUsed: pages, notice };
 }
 
 /**

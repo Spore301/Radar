@@ -34,6 +34,8 @@ export interface QueryRunResult {
   /** Metered SerpAPI calls spent on this query. */
   creditsUsed: number;
   error?: string;
+  /** The engine's own account of the result set — populated especially when nothing came back. */
+  notice?: string;
 }
 
 export interface SearchStats {
@@ -162,6 +164,7 @@ export async function executeXRaySearch(
           pagesFetched: serp.pagesFetched,
           creditsUsed: serp.creditsUsed,
           error: failed ? serp.error : undefined,
+          notice: serp.notice,
         },
         candidates,
       });
