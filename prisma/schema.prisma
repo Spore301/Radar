@@ -1,0 +1,487 @@
+// CandidateRadar data model.
+//
+// Domain + search-budget tables (Job, Candidate, SearchRun, SerpQueryCache,
+// CreditPeriod, ...) persist real search results and meter SerpAPI credits.
+// Auth tables (User, Account, Session, VerificationToken) follow the Prisma
+// adapter's standard shape from https://authjs.dev/getting-started/adapters/prisma
+// — no `@db.Text`/`@map` on those, since SQLite has no such native type and the
+// rest of this schema doesn't use column-renaming maps either. `Invite` is
+// CandidateRadar's own addition, checked in the sign-in callback alongside the
+// `hd` (hosted-domain) claim.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum JobStatus {
+  draft
+  parsing
+  searching
+  complete
+  archived
+}
+
+enum SearchTier {
+  free
+  precision
+}
+
+enum RunStatus {
+  queued
+  validating
+  reserved
+  running
+  partial
+  completed
+  failed
+  aborted
+}
+
+enum QueryOutcome {
+  pending
+  cache_hit
+  fetched
+  failed
+  skipped
+  blocked
+}
+
+enum ScrapeStatus {
+  success
+  snippet_only
+  unverified
+  blocked
+  failed
+}
+
+enum CandidatePlatform {
+  LinkedIn
+  GitHub
+  StackOverflow
+  Wellfound
+  Behance
+  Dribbble
+  Xing
+  Resumes
+  MultiSite
+}
+
+enum CandidateStatus {
+  New
+  Reviewed
+  Saved
+  Contacted
+  Replied
+  Shortlisted
+  Archived
+}
+
+// Prisma enum values must be valid identifiers, so the one channel with a space
+// in its domain-type spelling ("LinkedIn DM") is mapped back to that exact
+// string at the database level.
+enum OutreachChannel {
+  LinkedInDM @map("LinkedIn DM")
+  Email
+  WhatsApp
+  Call
+}
+
+enum LedgerKind {
+  reserve
+  commit
+  release
+  reconcile
+  rollover
+  manual_adjust
+}
+
+// Distinct from a job's role_type (which lives inside Job.structuredJd's JSON,
+// not as a column): message templates can also be tagged "General", which the
+// app's own RoleType union does not include.
+enum TemplateRoleType {
+  Engineering
+  Design
+  Marketing
+  Sales
+  Operations
+  Other
+  General
+}
+
+enum Tone {
+  Warm
+  Professional
+  Direct
+  ShortAndPunchy @map("Short & Punchy")
+}
+
+enum CredentialProvider {
+  serpapi
+  deepseek
+}
+
+// ---------------------------------------------------------------------------
+// Auth (Auth.js Prisma adapter — standard shape) + invite allowlist
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  accounts Account[]
+  sessions Session[]
+
+  // Attribution back-relations — see the "authorship, not access control" note
+  // on each model below. Every one of these is optional: deleting a user sets
+  // the FK to null rather than cascading, so a departed teammate's jobs and
+  // outreach history stay visible to the rest of the shared workspace.
+  createdJobs             Job[]
+  startedRuns             SearchRun[]
+  sentOutreachLogs        OutreachLog[]
+  lastUpdatedOnCandidates Candidate[]
+  createdTemplates        MessageTemplate[]
+  fetchedCacheEntries     SerpQueryCache[]
+
+  // Per-user BYOK state — deleting a user removes their keys and budget
+  // history with them, since neither means anything without the owner.
+  credentials   ProviderCredential[]
+  creditPeriods CreditPeriod[]
+  ledgerEntries CreditLedger[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Sign-in allowlist for accounts outside ALLOWED_GOOGLE_DOMAIN. Checked in the
+// Auth.js `signIn` callback alongside the ID token's `hd` claim.
+model Invite {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  invitedBy String?
+  createdAt DateTime  @default(now())
+  usedAt    DateTime?
+}
+
+// ---------------------------------------------------------------------------
+// Domain
+// ---------------------------------------------------------------------------
+
+model Job {
+  id                String    @id @default(cuid())
+  title             String
+  rawJdText         String
+  // Mirrors src/lib/types/index.ts: StructuredJD, MergedConstraints, XRayQuery[],
+  // KeywordMap. Parsed/validated on read via src/lib/db/json.ts, not by the DB.
+  structuredJd      Json
+  mergedConstraints Json
+  queryBundle       Json
+  keywordMap        Json
+  status            JobStatus @default(draft)
+  candidateCount    Int       @default(0)
+  // Authorship, not access control — every signed-in user sees every job
+  // regardless of who created it (see the plan's "shared workspace" note).
+  createdById       String?
+  createdBy         User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  candidates Candidate[]
+  runs       SearchRun[]
+
+  @@index([status])
+  @@index([createdById])
+}
+
+model Candidate {
+  id                       String            @id @default(cuid())
+  jobId                    String
+  job                      Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  name                     String
+  headline                 String
+  location                 String
+  profileUrl               String
+  // Lowercased, trailing-slash/query/fragment-stripped form of profileUrl.
+  // Enforces cross-run dedupe at the database level (see @@unique below),
+  // rather than only in the in-memory Levenshtein pass.
+  profileUrlCanonical      String
+  platform                 CandidatePlatform
+  avatarUrl                String?
+  skillsDetected           Json
+  experienceYearsEstimated Int?
+  summarySnippet           String
+  matchScore               Int
+  matchBreakdown           Json
+  matchRationale           String
+  missingSignals           Json
+  dataCompleteness         Float
+  rawScrapedData           Json?
+  sourceQueryId            String?
+  sourceRunId              String?
+  sourceTier               SearchTier?
+  // Evidence for liveness (HTTP status from the scrape itself), replacing the
+  // old pattern of re-fetching every URL a second time just to check it's alive.
+  httpStatus               Int?
+  livenessCheckedAt        DateTime?
+  scrapeStatus             ScrapeStatus
+  status                   CandidateStatus   @default(New)
+  outreachChannel          OutreachChannel?
+  outreachDate             DateTime?
+  nextFollowUp             DateTime?
+  notes                    String?
+  tags                     Json?
+  templateUsedId           String?
+  lastUpdatedById          String?
+  lastUpdatedBy            User?             @relation(fields: [lastUpdatedById], references: [id], onDelete: SetNull)
+  discoveredAt             DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  outreachLogs OutreachLog[]
+
+  @@unique([jobId, profileUrlCanonical])
+  @@index([jobId, status])
+  @@index([jobId, matchScore])
+  @@index([lastUpdatedById])
+}
+
+model OutreachLog {
+  id           String          @id @default(cuid())
+  candidateId  String
+  candidate    Candidate       @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  channel      OutreachChannel
+  sentAt       DateTime        @default(now())
+  messageBody  String
+  notes        String?
+  followUpDate DateTime?
+  tags         Json?
+  sentById     String?
+  sentBy       User?           @relation(fields: [sentById], references: [id], onDelete: SetNull)
+
+  @@index([candidateId, sentAt])
+  @@index([sentById])
+}
+
+model MessageTemplate {
+  id          String            @id @default(cuid())
+  name        String
+  channel     OutreachChannel
+  body        String
+  roleType    TemplateRoleType?
+  tone        Tone?
+  createdById String?
+  createdBy   User?             @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime          @default(now())
+
+  @@index([createdById])
+}
+
+// ---------------------------------------------------------------------------
+// Search execution + SerpAPI budget metering
+// ---------------------------------------------------------------------------
+
+model SearchRun {
+  id     String     @id @default(cuid())
+  jobId  String
+  job    Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  tier   SearchTier
+  status RunStatus  @default(queued)
+
+  resultsCap Int
+  // Frozen RunCostEstimate at reservation time — what the user actually
+  // confirmed spending, so a later re-estimate can be checked against it.
+  estimate   Json?
+
+  creditsReserved  Int @default(0)
+  creditsCommitted Int @default(0)
+  creditsReleased  Int @default(0)
+  cacheHitCount    Int @default(0)
+  queriesTotal     Int @default(0)
+  queriesDone      Int @default(0)
+  rawResultCount   Int @default(0)
+  candidateCount   Int @default(0)
+
+  abortRequested       Boolean   @default(false)
+  reservationExpiresAt DateTime?
+  heartbeatAt          DateTime?
+
+  startedById  String?
+  startedBy    User?     @relation(fields: [startedById], references: [id], onDelete: SetNull)
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  errorCode    String?
+  errorMessage String?
+
+  queries       SearchRunQuery[]
+  ledgerEntries CreditLedger[]
+
+  @@index([status, heartbeatAt])
+  @@index([startedById])
+}
+
+// Per-query outcome — what makes error reporting and the credit receipt real,
+// instead of a swallowed console.error and a single pass/fail for the whole run.
+model SearchRunQuery {
+  id               String            @id @default(cuid())
+  runId            String
+  run              SearchRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  queryId          String
+  platform         CandidatePlatform
+  // Template id from src/lib/search/xrayTemplates.ts ('linkedin_broad', ...)
+  // or 'custom' — lets a reopened session show the receipt exactly as it ran.
+  queryType        String            @default("custom")
+  queryString      String
+  canonicalHash    String
+  // Which engine actually answered: 'serpapi', 'google-headless',
+  // 'duckduckgo-headless', or null when nothing did.
+  provider         String?
+  outcome          QueryOutcome      @default(pending)
+  creditCost       Int               @default(0)
+  resultCount      Int               @default(0)
+  keptCount        Int               @default(0)
+  validationErrors Json?
+  errorCode        String?
+  errorMessage     String?
+  latencyMs        Int?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+
+  @@index([runId])
+}
+
+// Workspace-wide (not per-user): a SERP one teammate paid for serves everyone
+// else free, since results land in the same shared workspace regardless.
+model SerpQueryCache {
+  key           String    @id
+  engine        String
+  queryString   String
+  params        Json
+  rawResponse   Json
+  resultCount   Int
+  isNegative    Boolean   @default(false)
+  fetchedAt     DateTime  @default(now())
+  expiresAt     DateTime
+  hitCount      Int       @default(0)
+  lastHitAt     DateTime?
+  costedCredits Int       @default(1)
+  fetchedById   String?
+  fetchedBy     User?     @relation(fields: [fetchedById], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+  @@index([fetchedById])
+}
+
+// One row per user per billing period (BYOK: each user metering their own
+// SerpAPI plan).
+model CreditPeriod {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  periodStart DateTime
+  // Mirrors that user's SerpAPI `plan_renewal_date` — rollover is read from the
+  // provider, never computed locally.
+  periodEnd   DateTime
+  budgetLimit Int
+  spent       Int      @default(0)
+  reserved    Int      @default(0)
+
+  providerPlanName String?
+  providerPerMonth Int?
+  providerLeft     Int?
+  providerUsage    Int?
+  rateLimitPerHour Int?
+  lastSnapshotAt   DateTime?
+  closed           Boolean   @default(false)
+
+  ledger CreditLedger[]
+
+  @@unique([userId, periodEnd])
+  @@index([userId, closed])
+}
+
+// Append-only. SerpAPI is authoritative for what was actually billed; this
+// ledger is a pessimistic real-time approximation reconciled against it.
+model CreditLedger {
+  id       String       @id @default(cuid())
+  periodId String
+  period   CreditPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  runId    String?
+  run      SearchRun?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+  userId   String
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind     LedgerKind
+  delta    Int
+  reason   String?
+  cacheKey String?
+
+  balanceAfterSpent    Int
+  balanceAfterReserved Int
+  createdAt            DateTime @default(now())
+
+  @@index([periodId, createdAt])
+  @@index([runId])
+  @@index([userId])
+}
+
+// Per-user BYOK key storage. Plaintext never leaves the server — see
+// src/lib/db/json.ts and the settings API, which only ever return
+// { configured, keyLast4 }.
+model ProviderCredential {
+  id             String             @id @default(cuid())
+  userId         String
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider       CredentialProvider
+  ciphertext     String
+  iv             String
+  authTag        String
+  keyLast4       String
+  label          String?
+  createdAt      DateTime           @default(now())
+  lastVerifiedAt DateTime?
+
+  @@unique([userId, provider])
+}

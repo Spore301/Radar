@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   CandidateRadar on the Vercel / Geist design language.
+   Near-black ink on a near-white canvas; 1px hairline defines every object;
+   6px radius for anything you press, 12px for anything you read; weight is
+   600 for headings, 500 for buttons and labels, 400 for everything else.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --canvas: #fafafa;
+  --elevated: #ffffff;
+  --ink: #171717;
+  --body: #4d4d4d;
+  --mute: #8f8f8f;
+  --faint: #a1a1a1;
+  --hairline: #ebebeb;
+  --hairline-soft: #f2f2f2;
+  --link: #0070f3;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  body {
+    @apply bg-canvas text-ink font-sans text-body-md antialiased;
+  }
+  ::selection {
+    background: var(--link);
+    color: #fff;
+  }
+  :focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--faint);
+  }
+}
+
+@layer components {
+  /* Type roles */
+  .eyebrow {
+    @apply font-mono text-eyebrow uppercase text-mute;
+  }
+  .field-label {
+    @apply text-body-sm font-medium text-body;
+  }
+
+  /* Surfaces */
+  .card {
+    @apply bg-elevated border border-hairline rounded-md;
+  }
+  .well {
+    @apply bg-canvas border border-hairline rounded-md;
+  }
+
+  /* App chrome: 6px squares, height from line-height */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-sm text-body-sm font-medium whitespace-nowrap select-none transition-colors duration-150 disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-primary {
+    @apply btn bg-ink text-white border border-ink hover:bg-[#383838] hover:border-[#383838];
+  }
+  .btn-ghost {
+    @apply btn bg-elevated text-ink border border-hairline hover:bg-hairline-soft;
+  }
+  .btn-subtle {
+    @apply btn bg-transparent text-body border border-transparent hover:bg-hairline-soft hover:text-ink;
+  }
+  .btn-danger {
+    @apply btn bg-elevated text-error border border-hairline hover:bg-error-soft;
+  }
+  .btn-lg {
+    @apply h-10 px-4 text-body-md;
+  }
+  .btn-sm {
+    @apply h-7 px-2.5 text-body-xs;
+  }
+  .btn-icon {
+    @apply btn w-8 px-0 text-body hover:text-ink;
+  }
+
+  .input {
+    @apply w-full h-8 px-2.5 bg-elevated border border-hairline rounded-sm text-body-sm text-ink outline-none transition-colors focus:border-ink;
+  }
+  .input-lg {
+    @apply h-10 px-3 text-body-md;
+  }
+  .textarea {
+    @apply w-full p-3 bg-elevated border border-hairline rounded-sm text-body-sm text-ink outline-none transition-colors focus:border-ink resize-none leading-relaxed;
+  }
+  .select {
+    @apply input pr-8 appearance-none bg-no-repeat bg-[right_8px_center] bg-[length:12px_12px];
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f8f8f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 h-[22px] px-2 rounded-sm border border-hairline bg-elevated text-body-xs text-body whitespace-nowrap;
+  }
+  .chip-ink {
+    @apply chip bg-ink text-white border-ink;
+  }
+
+  /* Segmented control */
+  .seg {
+    @apply inline-flex border border-hairline rounded-sm overflow-hidden bg-elevated;
+  }
+  .seg-item {
+    @apply inline-flex items-center gap-1.5 h-8 px-3 text-body-sm text-body border-r border-hairline last:border-r-0 hover:text-ink hover:bg-hairline-soft transition-colors whitespace-nowrap;
+  }
+  .seg-item[aria-pressed='true'],
+  .seg-item.is-on {
+    @apply bg-hairline-soft text-ink;
+  }
+
+  /* Tables */
+  .table {
+    @apply w-full text-left border-collapse text-body-sm;
+  }
+  .table th {
+    @apply eyebrow text-left py-2.5 px-4 border-b border-hairline font-medium normal-case tracking-normal font-sans text-body-xs text-mute;
+  }
+  .table td {
+    @apply py-3 px-4 border-b border-hairline align-middle;
+  }
+
+  /* Progress */
+  .track {
+    @apply relative w-full h-1.5 rounded-full bg-hairline-soft overflow-hidden;
+  }
+  .track-fill {
+    @apply h-full rounded-full bg-ink transition-[width] duration-300 ease-out;
+  }
+}
+
+/* Motion: one short fade; nothing else animates. */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slideLeft {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes slideRight {
+  from { transform: translateX(-8px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-fade-in { animation: fadeIn 150ms ease-out forwards; }
+.animate-slide-left { animation: slideLeft 180ms ease-out forwards; }
+.animate-slide-right { animation: slideRight 150ms ease-out forwards; }
+
+/* Indeterminate progress bar (processing overlay / status bar) */
+@keyframes indeterminateSlide {
+  0% { left: -40%; width: 40%; }
+  60% { left: 60%; width: 50%; }
+  100% { left: 100%; width: 30%; }
+}
+.animate-indeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  animation: indeterminateSlide 1.4s ease-in-out infinite;
+}
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in, .animate-slide-left, .animate-slide-right, .animate-indeterminate { animation: none !important; }
+  .animate-indeterminate { left: 0; width: 40%; }
+}

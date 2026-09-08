@@ -1,0 +1,45 @@
+{
+  "name": "candidate-radar",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "db:generate": "prisma generate"
+  },
+  "dependencies": {
+    "@auth/prisma-adapter": "^2.11.3",
+    "@prisma/client": "^6.19.3",
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.15.0",
+    "geist": "^1.7.2",
+    "lucide-react": "^0.469.0",
+    "mammoth": "^1.9.0",
+    "next": "^14.2.23",
+    "next-auth": "^5.0.0-beta.32",
+    "pdf-parse": "^1.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.6.0",
+    "zod": "^4.5.4"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.12",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3"
+  }
+}
