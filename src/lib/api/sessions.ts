@@ -41,6 +41,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export interface SessionDetailResponse {
   job: Job;
   candidates: CandidateProfile[];
+  agent_transcript?: unknown[] | null;
   last_run: {
     id: string;
     started_at: string;
@@ -104,7 +105,7 @@ export async function runSearch(
     jobId: string;
     constraints: MergedConstraints;
     queries: XRayQuery[];
-    apiKeys?: { serpapi?: string | null; brave?: string | null; deepseek?: string | null };
+    apiKeys?: { deepseek?: string | null };
     serpOptions?: SerpOptions;
   },
   onEvent?: (event: ProgressEvent) => void,
@@ -196,16 +197,15 @@ export function notifySessionsChanged(detail: { deletedId?: string } = {}): void
   window.dispatchEvent(new CustomEvent(SESSIONS_CHANGED_EVENT, { detail }));
 }
 
-/** Reads the BYOK keys the Settings page stores in the browser. */
-export function readStoredApiKeys(): { serpapi: string | null; brave: string | null; deepseek: string | null } {
-  if (typeof window === 'undefined') return { serpapi: null, brave: null, deepseek: null };
+/**
+ * The only key the browser may hold: an optional personal DeepSeek key. The
+ * SerpAPI key lives server-side (encrypted) since onboarding.
+ */
+export function readStoredApiKeys(): { deepseek: string | null } {
+  if (typeof window === 'undefined') return { deepseek: null };
   try {
-    return {
-      serpapi: localStorage.getItem('SERPAPI_KEY'),
-      brave: localStorage.getItem('BRAVE_SEARCH_KEY'),
-      deepseek: localStorage.getItem('DEEPSEEK_API_KEY'),
-    };
+    return { deepseek: localStorage.getItem('DEEPSEEK_API_KEY') || null };
   } catch {
-    return { serpapi: null, brave: null, deepseek: null };
+    return { deepseek: null };
   }
 }

@@ -33,7 +33,7 @@ export default async function SignInPage({
         <form
           action={async () => {
             'use server';
-            await signIn('google', { redirectTo: searchParams.callbackUrl || '/' });
+            await signIn('google', { redirectTo: searchParams.callbackUrl || '/dashboard' });
           }}
         >
           <button type="submit" className="btn-primary btn-lg w-full">

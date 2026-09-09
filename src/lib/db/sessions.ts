@@ -122,6 +122,8 @@ export async function listSessions(): Promise<SessionSummary[]> {
 export interface SessionDetail {
   job: Job;
   candidates: CandidateProfile[];
+  /** Agent conversation that built this session, when there is one. */
+  agent_transcript: unknown[] | null;
   last_run: { id: string; started_at: string; finished_at: string | null; stats: SearchStats; query_results: QueryRunResult[] } | null;
 }
 
@@ -178,7 +180,7 @@ export async function getSession(id: string): Promise<SessionDetail | null> {
     };
   }
 
-  return { job: toJob(row), candidates, last_run };
+  return { job: toJob(row), candidates, last_run, agent_transcript: Array.isArray(row.agentTranscript) ? (row.agentTranscript as unknown[]) : null };
 }
 
 export interface SessionPatch {

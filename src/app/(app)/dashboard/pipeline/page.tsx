@@ -145,7 +145,7 @@ export default function PipelinePage() {
         <div className="card p-10 flex flex-col items-center text-center gap-3">
           <p className="text-body-md font-medium text-ink">No candidates yet</p>
           <p className="text-body-sm text-mute max-w-[44ch]">Run a search from a job description. Every profile it indexes is stored in that session and appears here.</p>
-          <Link href="/" className="btn-primary">
+          <Link href="/dashboard" className="btn-primary">
             New search
           </Link>
         </div>

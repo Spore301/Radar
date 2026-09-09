@@ -140,6 +140,10 @@ model User {
   emailVerified DateTime?
   image         String?
   createdAt     DateTime  @default(now())
+  // Onboarding (PaaS): the recruiter's organisation is used in outreach copy
+  // and the onboarding wizard is complete once onboardedAt is set.
+  company       String?
+  onboardedAt   DateTime?
 
   accounts Account[]
   sessions Session[]
@@ -222,6 +226,9 @@ model Job {
   mergedConstraints Json
   queryBundle       Json
   keywordMap        Json
+  // Agent view: the conversation that built this session (AgentMessage[]),
+  // so reopening the session restores the chat and its reasoning trace.
+  agentTranscript   Json?
   status            JobStatus @default(draft)
   candidateCount    Int       @default(0)
   // Authorship, not access control — every signed-in user sees every job

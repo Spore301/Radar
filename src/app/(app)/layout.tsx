@@ -1,12 +1,11 @@
 import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { auth } from '@/lib/auth';
+import { isOnboarded } from '@/lib/db/users';
 import { AppShell } from '@/components/layout/AppShell';
 
-// Auth gate for every page under this route group ('/', '/pipeline',
-// '/templates', '/settings' — the group segment "(app)" adds no URL segment
-// of its own). `/signin` and `/api/auth/*` live outside this group and are
-// reachable without a session.
+// Auth gate for the application under /dashboard/*. `/`, `/signin`,
+// `/onboarding` and `/api/auth/*` live outside this group.
 //
 // This check does NOT live in src/middleware.ts. Next.js 14 middleware only
 // runs in the Edge runtime, and our session strategy is 'database' (via the
@@ -15,10 +14,8 @@ import { AppShell } from '@/components/layout/AppShell';
 // route handler in this app, so `auth()` here does a real, correct DB check.
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
-
-  if (!session) {
-    redirect('/signin');
-  }
+  if (!session?.user?.id) redirect('/signin?callbackUrl=%2Fdashboard');
+  if (!(await isOnboarded(session.user.id))) redirect('/onboarding');
 
   return (
     <Suspense fallback={null}>

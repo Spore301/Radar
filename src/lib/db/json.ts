@@ -47,6 +47,7 @@ const structuredJdSchema: z.ZodType<StructuredJD> = z.object({
   }),
   location: z.object({
     primary: z.string().nullable(),
+    country: z.string().nullable().optional(),
     remote_eligible: z.boolean(),
   }),
   skills: z.object({

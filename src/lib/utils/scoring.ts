@@ -1,4 +1,5 @@
 import { MergedConstraints, MatchBreakdown, CandidateProfile } from '../types';
+import { parseLocation } from '../search/location';
 import { isSoftSkill } from '../search/xrayTemplates';
 
 // Alternate spellings a profile and a JD commonly disagree on. Both sides are
@@ -129,18 +130,25 @@ export function calculateRelevanceScore(
   const seniority_score = titlePart + seniorityPart;
 
   // 4. Location / Remote Fit (Max 15)
-  let location_score = 10;
-  const targetLoc = normalizeLocation(constraints.location);
-  const candLoc = normalizeLocation(candidateLocation);
-
-  if (constraints.remote_eligible && (candLoc.includes('remote') || targetLoc.includes('remote'))) {
+  //
+  // Alias-aware: "Bangalore" and "Bengaluru, Karnataka, India" are the same
+  // place; same country but a different city is partial credit; an unknown
+  // candidate location is neutral-low rather than a penalty.
+  let location_score = 8;
+  const want = parseLocation(constraints.location);
+  const have = parseLocation(candidateLocation);
+  const unknown = /not specified/i.test(candidateLocation) || (!have.cities.length && !have.country && !have.remote);
+  if (constraints.remote_eligible && (have.remote || want.remote)) {
     location_score = 15;
-  } else if (candLoc.includes(targetLoc.split(',')[0])) {
+  } else if (want.cities.length && have.cities.length && want.cities.some((w) => have.cities.some((h) => h.name === w.name))) {
     location_score = 15;
-  } else if (candLoc.includes('india') && targetLoc.includes('india')) {
-    location_score = 13;
-  } else {
+  } else if (want.country && have.country && want.country.name === have.country.name) {
+    location_score = 11;
+  } else if (unknown || !want.display) {
     location_score = 8;
+  } else {
+    location_score = 4;
+    missingSignals.push(`Location: profile says ${candidateLocation}, role is ${constraints.location}`);
   }
 
   // 5. Domain Overlap (Max 10)

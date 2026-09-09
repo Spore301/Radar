@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/session';
+import { getUserCompany } from '@/lib/db/users';
 
 export async function POST(req: NextRequest) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
 
   try {
@@ -11,7 +12,8 @@ export async function POST(req: NextRequest) {
 
     const candName = candidate?.name || 'Candidate';
     const skillsList = (candidate?.skills_detected || ['key technologies']).slice(0, 3).join(', ');
-    const company = companyName || 'our engineering team';
+    // The recruiter's organisation from onboarding, never the platform's name.
+    const company = (await getUserCompany(session!.user.id)) || companyName || 'our team';
     const role = jobTitle || 'this key role';
 
     let subjectLine: string | null = null;

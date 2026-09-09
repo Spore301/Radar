@@ -3,11 +3,12 @@ import { executeXRaySearch } from '@/lib/search/x-raySearchService';
 import { resolveSerpOptions } from '@/lib/search/serpConfig';
 import { requireSession } from '@/lib/session';
 import { getSession, recordSearchRun, updateSession } from '@/lib/db/sessions';
+import { getProviderKey } from '@/lib/credentials';
 import { ndjsonResponse } from '@/lib/api/ndjson';
 
 // Up to 16 individually-searched queries; SerpAPI runs finish in seconds, but
 // the headless-browser fallback can take ~20s per query at 4-way concurrency.
-export const maxDuration = 120;
+export const maxDuration = 180;
 export const dynamic = 'force-dynamic';
 
 /**
@@ -44,6 +45,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   }
 
+  // The recruiter's own SerpAPI key (stored encrypted at onboarding / Settings)
+  // pays for this run; the platform key is only a fallback. Refusing up front
+  // beats nine queries that each silently return nothing.
+  const serpapi = (await getProviderKey(session!.user.id, 'serpapi')) ?? process.env.SERPAPI_KEY ?? null;
+  if (!serpapi) {
+    return NextResponse.json({ error: 'No SerpAPI key on file. Add one in Settings before running a search.' }, { status: 400 });
+  }
+
   return ndjsonResponse(async (emit) => {
     // Persist what is about to run so the receipt and the bundle agree even if
     // the run itself is interrupted.
@@ -51,7 +60,7 @@ export async function POST(req: NextRequest) {
 
     emit({ type: 'start', total: queries.length });
 
-    const result = await executeXRaySearch(jobId, constraints, queries, apiKeys, resolveSerpOptions(serpOptions), {
+    const result = await executeXRaySearch(jobId, constraints, queries, { serpapi, deepseek: apiKeys?.deepseek ?? null }, resolveSerpOptions(serpOptions), {
       onQueryStart: (q, index, total) =>
         emit({ type: 'query_start', queryId: q.id, platform: q.platform, queryType: q.query_type, index, total }),
       onQueryDone: (r, done, total, indexedSoFar) => emit({ type: 'query_done', result: r, done, total, indexedSoFar }),

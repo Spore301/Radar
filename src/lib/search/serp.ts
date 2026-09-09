@@ -107,7 +107,8 @@ async function fetchSerpApiPage(
   });
 
   const res = await fetch(`https://serpapi.com/search.json?${params.toString()}`, {
-    signal: AbortSignal.timeout(25_000),
+    // SerpAPI runs a live Google search per call; 20–40 s is normal under load.
+    signal: AbortSignal.timeout(55_000),
   });
   if (!res.ok) {
     throw new Error(`SerpAPI HTTP ${res.status}`);
@@ -165,8 +166,9 @@ async function searchWithSerpApi(
     return added;
   };
 
-  // Page 1: ask for 100. If the engine honours it we're done in one credit.
-  const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, 100);
+  // Page 1. Google caps organic results at 10 per page since it dropped num=100;
+  // asking for more only routes the request onto its slow path and times out.
+  const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, SERP_PAGE_SIZE);
   const notice = first.notice;
   pages = 1;
   absorb(first.results);
@@ -203,14 +205,16 @@ export async function runSerpQuery(queryString: string, keys: SerpApiKeys = {}, 
     // One retry after a short pause: SerpAPI's per-second rate limit and the
     // occasional upstream timeout are transient, and a query that fails here
     // otherwise silently contributes nothing to the run.
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const paged = await searchWithSerpApi(queryString, serpKey, options);
         return { provider: 'serpapi', ...paged };
       } catch (err: any) {
-        const message = err?.message || 'SerpAPI failed';
-        errors.push(attempt === 0 ? message : `${message} (after retry)`);
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1000));
+        const message = /timeout|aborted/i.test(String(err?.name || err?.message))
+          ? 'SerpAPI did not answer within 55 s'
+          : err?.message || 'SerpAPI failed';
+        errors.push(attempt === 0 ? message : `${message} (retry ${attempt})`);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, (attempt + 1) * 2000 + Math.random() * 1000));
       }
     }
   }

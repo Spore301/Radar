@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
-import { Search, History, Users, FileText, Settings, LogOut, Radar, type LucideIcon } from 'lucide-react';
+import { Search, History, Users, FileText, Settings, LogOut, Radar, Sparkles, type LucideIcon } from 'lucide-react';
 import { Avatar } from '@/components/ui/Avatar';
 import { HistoryPanel } from '@/components/sessions/HistoryPanel';
 import * as api from '@/lib/api/sessions';
@@ -18,10 +18,11 @@ import { SESSIONS_CHANGED_EVENT } from '@/lib/api/sessions';
 // ---------------------------------------------------------------------------
 
 const NAV = [
-  { label: 'New search', href: '/', icon: Search },
-  { label: 'Pipeline', href: '/pipeline', icon: Users },
-  { label: 'Templates', href: '/templates', icon: FileText },
-  { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'New search', href: '/dashboard', icon: Search },
+  { label: 'Agent', href: '/dashboard/agent', icon: Sparkles },
+  { label: 'Pipeline', href: '/dashboard/pipeline', icon: Users },
+  { label: 'Templates', href: '/dashboard/templates', icon: FileText },
+  { label: 'Settings', href: '/dashboard/settings', icon: Settings },
 ] as const;
 
 export const SIDEBAR_WIDTH = 232;
@@ -33,8 +34,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sessionCount, setSessionCount] = useState<number | null>(null);
+  const [company, setCompany] = useState<string | null>(null);
 
-  const activeSessionId = pathname === '/' ? searchParams.get('session') : null;
+  const activeSessionId = pathname === '/dashboard' || pathname === '/dashboard/agent' ? searchParams.get('session') : null;
 
   const refreshCount = useCallback(async () => {
     try {
@@ -50,6 +52,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     window.addEventListener(SESSIONS_CHANGED_EVENT, refreshCount);
     return () => window.removeEventListener(SESSIONS_CHANGED_EVENT, refreshCount);
   }, [refreshCount]);
+
+  useEffect(() => {
+    fetch('/api/me')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCompany(d?.profile?.company ?? null))
+      .catch(() => {});
+  }, []);
 
   // Close the panel on route change and on Escape.
   useEffect(() => {
@@ -68,7 +77,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const user = session?.user;
   const displayName = user?.name ?? user?.email ?? 'Signed in';
 
-  const isActive = (href: string) => (href === '/' ? pathname === '/' : pathname.startsWith(href));
+  const isActive = (href: string) => (href === '/dashboard' ? pathname === '/dashboard' : pathname.startsWith(href));
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
@@ -78,7 +87,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         aria-label="Primary"
       >
         <div className="px-3 pt-4 pb-3 flex items-center justify-between lg:justify-start">
-          <Link href="/" className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-hairline-soft transition-colors">
+          <Link href="/dashboard" className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-hairline-soft transition-colors">
             <span className="w-5 h-5 rounded-[4px] bg-ink text-white flex items-center justify-center">
               <Radar className="w-3 h-3" strokeWidth={2.5} />
             </span>
@@ -114,7 +123,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Avatar name={displayName} src={user?.image} size={28} />
           <div className="min-w-0 flex-1 leading-tight">
             <div className="text-body-sm text-ink truncate">{displayName}</div>
-            {user?.email && user?.name && <div className="text-body-xs text-mute truncate">{user.email}</div>}
+            <div className="text-body-xs text-mute truncate">{company ?? user?.email ?? ''}</div>
           </div>
           <button
             type="button"
@@ -142,11 +151,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             onClose={() => setHistoryOpen(false)}
             onSelect={(id) => {
               setHistoryOpen(false);
-              router.push(`/?session=${encodeURIComponent(id)}`);
+              router.push(`/dashboard?session=${encodeURIComponent(id)}`);
             }}
             onNew={() => {
               setHistoryOpen(false);
-              router.push('/');
+              router.push('/dashboard');
             }}
           />
         </>

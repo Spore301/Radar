@@ -182,7 +182,7 @@ function SourcingDashboard() {
     loadedSessionRef.current = id;
     setSessionTitle(title);
     setSessionUpdatedAt(new Date().toISOString());
-    router.replace(`/?session=${encodeURIComponent(id)}`);
+    router.replace(`/dashboard?session=${encodeURIComponent(id)}`);
     notifySessionsChanged();
   };
 
@@ -561,7 +561,7 @@ function SourcingDashboard() {
           <section className="card">
             <div className="px-5 py-4 border-b border-hairline flex items-center justify-between gap-3">
               <h2 className="text-label-sm text-ink">Stored job description</h2>
-              <button type="button" onClick={() => router.push('/')} className="btn-ghost">
+              <button type="button" onClick={() => router.push('/dashboard')} className="btn-ghost">
                 New session from another JD
               </button>
             </div>

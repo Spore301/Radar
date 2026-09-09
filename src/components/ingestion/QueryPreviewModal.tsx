@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { MergedConstraints, XRayQuery } from '@/lib/types';
 import { Trash2, Plus, X, Pencil, Check } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { QueryTokenView } from '@/components/queries/QueryTokenView';
-import { QueryBuilder, BuilderContext } from '@/components/queries/QueryBuilder';
-import { getTemplate, countGoogleWords, GOOGLE_WORD_LIMIT, deriveQueryTerms } from '@/lib/search/xrayTemplates';
+import { QueryBuilder } from '@/components/queries/QueryBuilder';
+import { getTemplate, countGoogleWords, GOOGLE_WORD_LIMIT } from '@/lib/search/xrayTemplates';
 import { DEFAULT_MAX_PAGES_PER_QUERY, HARD_MAX_PAGES_PER_QUERY, SERP_PAGE_SIZE } from '@/lib/search/serpConfig';
 
 interface QueryPreviewModalProps {
@@ -35,18 +35,6 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, onClose, editingId]);
-
-  const context = useMemo<BuilderContext>(() => {
-    if (!constraints) return {};
-    const t = deriveQueryTerms(constraints);
-    return {
-      roles: t.role_synonyms,
-      skills: t.must_have_skills,
-      locations: t.location_terms,
-      required: t.required_phrases.flatMap((p) => p.split('|')),
-      excludes: t.exclude_terms,
-    };
-  }, [constraints]);
 
   if (!isOpen) return null;
 
@@ -80,7 +68,7 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
               {queries.length} {queries.length === 1 ? 'query' : 'queries'} · each searched individually
             </h2>
             <p className="text-body-sm text-mute mt-0.5">
-              One approved X-Ray type per row, shown as syntax pills. Edit a row to rearrange, add or remove pieces by drag and drop, or switch to text.
+              One approved X-Ray type per row, shown as colour-coded syntax pills. Edit a row to type keywords or drag syntax chips into the query.
             </p>
           </div>
           <button type="button" onClick={onClose} className="btn-icon" aria-label="Close">
@@ -133,7 +121,7 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
                   )}
 
                   {editing ? (
-                    <QueryBuilder value={q.query_string} onChange={(next) => update(q.id, next)} context={context} initialMode="builder" />
+                    <QueryBuilder value={q.query_string} onChange={(next) => update(q.id, next)} />
                   ) : (
                     <button
                       type="button"

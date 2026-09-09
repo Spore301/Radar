@@ -33,7 +33,7 @@ export function OutreachGeneratorModal({ onClose, candidate, jobTitle = 'the rol
       const res = await fetch('/api/generate-outreach', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate, jobTitle, companyName: 'CandidateRadar', tone, channel }),
+        body: JSON.stringify({ candidate, jobTitle, tone, channel }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Could not draft a message.');

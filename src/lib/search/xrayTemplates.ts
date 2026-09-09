@@ -1,5 +1,6 @@
 import { CandidatePlatform, MergedConstraints, SeniorityLevel, XRayQuery } from '../types';
 import { PLATFORM_IDS } from './platforms';
+import { parseLocation } from './location';
 
 // ---------------------------------------------------------------------------
 // X-Ray query templates.
@@ -547,46 +548,6 @@ const SKILL_SYNONYMS: Record<string, string[]> = {
   terraform: ['IaC'],
 };
 
-const LOCATION_ALIASES: Record<string, string[]> = {
-  bangalore: ['Bengaluru'],
-  bengaluru: ['Bangalore'],
-  gurgaon: ['Gurugram'],
-  gurugram: ['Gurgaon'],
-  mumbai: ['Bombay'],
-  'new york': ['NYC'],
-  'san francisco': ['SF', 'Bay Area'],
-  london: ['Greater London'],
-  delhi: ['New Delhi', 'NCR'],
-  ncr: ['Delhi', 'Gurgaon', 'Noida'],
-  hyderabad: ['Secunderabad'],
-};
-
-const GEO_TLDS: Array<[RegExp, string]> = [
-  [/germany|berlin|munich|münchen|hamburg|frankfurt|cologne|köln|stuttgart|düsseldorf|deutschland/i, '.de'],
-  [/austria|vienna|wien|salzburg|graz|österreich/i, '.at'],
-  [/switzerland|zurich|zürich|geneva|genève|basel|bern|lausanne|schweiz/i, '.ch'],
-  [/united kingdom|\buk\b|london|manchester|birmingham|leeds|glasgow|edinburgh|bristol|england|scotland|wales/i, '.co.uk'],
-  [
-    /india|bangalore|bengaluru|mumbai|bombay|delhi|\bncr\b|hyderabad|pune|chennai|madras|gurgaon|gurugram|noida|kolkata|calcutta|west bengal|ahmedabad|jaipur|kochi|cochin|coimbatore|indore|lucknow|nagpur|surat|chandigarh|bhubaneswar|vadodara|mysore|mysuru|thiruvananthapuram|trivandrum|visakhapatnam|goa/i,
-    '.in',
-  ],
-  [/netherlands|amsterdam|rotterdam|utrecht|eindhoven/i, '.nl'],
-  [/france|paris|lyon|marseille|toulouse|bordeaux/i, '.fr'],
-  [/singapore/i, '.sg'],
-  [/australia|sydney|melbourne|brisbane|perth/i, '.com.au'],
-  [/canada|toronto|vancouver|montreal|montréal|ottawa|calgary/i, '.ca'],
-  [/ireland|dublin/i, '.ie'],
-  [/spain|madrid|barcelona|valencia/i, '.es'],
-  [/italy|milan|milano|rome|roma|turin/i, '.it'],
-  [/poland|warsaw|kraków|krakow|wrocław/i, '.pl'],
-  [/sweden|stockholm|gothenburg/i, '.se'],
-  [/brazil|são paulo|sao paulo|rio de janeiro/i, '.com.br'],
-  [/\buae\b|dubai|abu dhabi|emirates/i, '.ae'],
-  [/south africa|johannesburg|cape town/i, '.co.za'],
-  [/new zealand|auckland|wellington/i, '.co.nz'],
-  [/japan|tokyo|osaka/i, '.co.jp'],
-];
-
 const SENIORITY_TERM: Record<SeniorityLevel | 'Any', string | null> = {
   Junior: 'Junior',
   Mid: null,
@@ -784,13 +745,11 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
     if (syn) skill_synonyms[skill] = syn;
   }
 
-  const location = (constraints.location || '').trim();
-  const city = location.split(',')[0].trim();
-  const location_terms = city && !/^remote$/i.test(city) ? uniq([city, ...(LOCATION_ALIASES[city.toLowerCase()] ?? [])]) : [];
-
-  // No match means no country-domain query. Defaulting to '.de' used to send a
-  // Kolkata search sweeping German domains and burn a credit on it.
-  const geo_tld = GEO_TLDS.find(([re]) => re.test(location))?.[1] ?? '';
+  // One place decides what a location means: spellings a profile would carry,
+  // the country domain for the geo sweep, and whether "remote" was said.
+  const loc = parseLocation(constraints.location);
+  const location_terms = loc.searchTerms.slice(0, 3);
+  const geo_tld = loc.tld;
   const details = parseAdditionalDetails(constraints.additional_details ?? constraints.soft_constraints);
 
   return {
@@ -802,7 +761,7 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
     discipline_terms: disciplineTerms(title, constraints.role_type || 'Engineering'),
     seniority_term: SENIORITY_TERM[seniority] ?? null,
     location_terms,
-    remote: Boolean(constraints.remote_eligible) || /remote/i.test(location),
+    remote: Boolean(constraints.remote_eligible) || loc.remote,
     geo_tld,
     required_phrases: details.required_phrases,
     exclude_terms: details.exclude_terms,

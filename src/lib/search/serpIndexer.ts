@@ -1,6 +1,7 @@
 import { CandidatePlatform, CandidateProfile, MergedConstraints, XRayQuery } from '../types';
 import { calculateRelevanceScore } from '../utils/scoring';
 import { detectPlatformFromUrl } from './platforms';
+import { ANY_CITY_RE, detectCityInText, cityDisplay } from './location';
 import type { RawSearchResult } from './serp';
 
 // ---------------------------------------------------------------------------
@@ -212,35 +213,27 @@ export function detectSkills(text: string, constraints: MergedConstraints): stri
   return found;
 }
 
-const LOCATION_HINTS =
-  /\b(bangalore|bengaluru|mumbai|delhi|new delhi|gurgaon|gurugram|noida|hyderabad|pune|chennai|kolkata|ahmedabad|san francisco|bay area|new york|london|berlin|munich|hamburg|vienna|zurich|amsterdam|paris|singapore|sydney|toronto|vancouver|dubai|remote|india|germany|united kingdom|united states|usa|canada|australia)\b/i;
-
 /**
  * LinkedIn snippets start with the profile location ("Bengaluru, Karnataka,
  * India · Senior Product Designer · Acme"); other platforms rarely expose one.
- * Falls back to a known-city scan of the whole text. Never borrows the JD's
- * location — an unknown location must stay unknown so scoring and dedupe
- * don't treat every profile as living where the job is.
+ * Falls back to the shared city table. Never borrows the JD's location — an
+ * unknown location must stay unknown so scoring and dedupe don't treat every
+ * profile as living where the job is.
  */
 export function detectLocation(snippet: string, fullText: string): string {
   const lead = snippet.split(/\s[·•|]\s/)[0]?.trim() ?? '';
-  const looksLikePlace =
-    lead.length > 0 &&
-    lead.length <= 60 &&
-    /^[A-Z][^:;()]*$/.test(lead) && // starts capitalised, no "Top tags:" style labels
-    /,/.test(lead) &&
-    lead.split(',').length <= 4 &&
-    !/\d/.test(lead) &&
-    !/\b(years?|experience|skills?|tags?|and|with)\b/i.test(lead);
-  if (looksLikePlace) {
+  if (lead && lead.length <= 60 && /,/.test(lead) && !/\d/.test(lead) && !/[:]/.test(lead) && /^[A-Z]/.test(lead) && !/\b(years?|experience|skills?|tags?)\b/i.test(lead)) {
     return lead;
   }
-  const m = fullText.match(LOCATION_HINTS);
-  if (!m) return UNKNOWN_LOCATION;
-  const loc = m[0];
-  if (/bangalore|bengaluru/i.test(loc)) return 'Bengaluru, India';
-  return loc.charAt(0).toUpperCase() + loc.slice(1);
+  const city = detectCityInText(fullText);
+  if (city) return cityDisplay(city);
+  if (/\bremote\b/i.test(fullText)) return 'Remote';
+  const country = fullText.match(/\b(india|germany|united kingdom|united states|canada|australia|singapore|netherlands|france)\b/i);
+  return country ? country[1].replace(/\b\w/g, (m) => m.toUpperCase()) : UNKNOWN_LOCATION;
 }
+
+// Kept for callers that only need a boolean "mentions a city".
+export const LOCATION_HINTS = ANY_CITY_RE;
 
 const SENIORITY_IN_HEADLINE = /\b(principal|staff|senior|sr\.?|lead|head of|director|vp|chief|junior|jr\.?|intern|associate)\b/i;
 

@@ -54,11 +54,11 @@ export function FileUploadZone({ onSubmit, isLoading }: FileUploadZoneProps) {
           <h2 className="text-label-sm text-ink">Job description</h2>
           <p className="text-body-sm text-mute mt-0.5">PDF, DOCX or TXT up to 10 MB, or pasted text. Only what the document says is extracted.</p>
         </div>
-        <div className="seg" role="tablist" aria-label="Input method">
-          <button type="button" role="tab" aria-selected={tab === 'upload'} aria-pressed={tab === 'upload'} onClick={() => setTab('upload')} className="seg-item">
+        <div className="seg" role="group" aria-label="Input method">
+          <button type="button" aria-pressed={tab === 'upload'} onClick={() => setTab('upload')} className="seg-item">
             <Upload className="w-3.5 h-3.5" /> Upload file
           </button>
-          <button type="button" role="tab" aria-selected={tab === 'paste'} aria-pressed={tab === 'paste'} onClick={() => setTab('paste')} className="seg-item">
+          <button type="button" aria-pressed={tab === 'paste'} onClick={() => setTab('paste')} className="seg-item">
             <FileText className="w-3.5 h-3.5" /> Paste text
           </button>
         </div>

@@ -39,6 +39,8 @@ export interface StructuredJD {
   };
   location: {
     primary: string | null;
+    /** Country when the JD states or implies one; lets the parser normalise "Kolkata" → "Kolkata, India". */
+    country?: string | null;
     remote_eligible: boolean;
   };
   skills: {

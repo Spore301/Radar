@@ -59,7 +59,7 @@ export interface XRaySearchResult {
 }
 
 /** How many SERP calls are in flight at once. SerpAPI tolerates this comfortably; headless Google does not want more. */
-const SERP_CONCURRENCY = 4;
+const SERP_CONCURRENCY = 3;
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
