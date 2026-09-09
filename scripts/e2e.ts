@@ -303,6 +303,20 @@ async function shot(page: Page, name: string) {
     const freshRow = await prisma.user.findUnique({ where: { id: fresh.id } });
     check('onboarding stores name, company and completion', freshRow?.name === 'Fresh Recruiter' && freshRow?.company === 'Fresh Org' && Boolean(freshRow?.onboardedAt));
     await fp.screenshot({ path: `${SHOTS}/14-onboarded.png` });
+
+    // --- another user cannot read or stop this user's search run (IDOR) --------------------
+    const ownRun = await prisma.searchRun.findFirst({ where: { startedById: user.id }, orderBy: { startedAt: 'desc' } });
+    const idorGet = await fp.request.get(`${BASE}/api/search-runs/${ownRun!.id}`);
+    check("another user's run reads as 404, not readable", idorGet.status() === 404, `status ${idorGet.status()}`);
+    const idorDelete = await fp.request.delete(`${BASE}/api/search-runs/${ownRun!.id}`);
+    check("another user cannot abort this user's run", idorDelete.status() === 404, `status ${idorDelete.status()}`);
+    const stillOwn = await prisma.searchRun.findUnique({ where: { id: ownRun!.id }, select: { abortRequested: true } });
+    check('the abort flag was not set by the other user', stillOwn?.abortRequested === false);
+    const idorList = await (await fp.request.get(`${BASE}/api/search-runs`)).json();
+    check("another user's run list does not leak this user's runs", Array.isArray(idorList.runs) && idorList.runs.length === 0, `${idorList.runs?.length} runs`);
+    const ownGet = await page.request.get(`${BASE}/api/search-runs/${ownRun!.id}`);
+    check('the owner can still read their own run', ownGet.status() === 200, `status ${ownGet.status()}`);
+
     await freshCtx.close();
     await prisma.session.deleteMany({ where: { userId: fresh.id } });
     await prisma.user.delete({ where: { id: fresh.id } }).catch(() => {});

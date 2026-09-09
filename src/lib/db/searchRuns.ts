@@ -153,9 +153,19 @@ export async function failRun(runId: string, jobId: string, message: string): Pr
   await prisma.job.update({ where: { id: jobId }, data: { status: 'draft' } }).catch(() => {});
 }
 
-/** Co-operative cancellation: the worker checks this between queries. */
-export async function requestAbort(runId: string): Promise<void> {
-  await prisma.searchRun.update({ where: { id: runId }, data: { abortRequested: true, statusText: 'Stopping…' } });
+/**
+ * Co-operative cancellation: the worker checks this between queries.
+ *
+ * Scoped to the run's owner in the WHERE clause, so a caller cannot stop
+ * someone else's run by guessing an id. Returns false when the run does not
+ * exist or is not this user's — the route reports both as 404.
+ */
+export async function requestAbort(runId: string, userId: string): Promise<boolean> {
+  const { count } = await prisma.searchRun.updateMany({
+    where: { id: runId, startedById: userId },
+    data: { abortRequested: true, statusText: 'Stopping…' },
+  });
+  return count > 0;
 }
 
 export async function isAbortRequested(runId: string): Promise<boolean> {
@@ -260,8 +270,13 @@ function toSnapshot(row: RunRow): RunSnapshot {
   };
 }
 
-export async function getRunSnapshot(runId: string): Promise<RunSnapshot | null> {
-  const row = await prisma.searchRun.findUnique({ where: { id: runId }, select: RUN_SELECT });
+/**
+ * One run, scoped to the user who started it. Ownership is part of the query
+ * rather than a check the caller has to remember: a run id belonging to
+ * someone else is indistinguishable from one that does not exist.
+ */
+export async function getRunSnapshot(runId: string, userId: string): Promise<RunSnapshot | null> {
+  const row = await prisma.searchRun.findFirst({ where: { id: runId, startedById: userId }, select: RUN_SELECT });
   return row ? toSnapshot(row as RunRow) : null;
 }
 
