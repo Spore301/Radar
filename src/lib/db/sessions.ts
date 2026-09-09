@@ -124,6 +124,8 @@ export interface SessionDetail {
   candidates: CandidateProfile[];
   /** Agent conversation that built this session, when there is one. */
   agent_transcript: unknown[] | null;
+  /** The agent's conversation memory (asked fields, confirmation, phase). */
+  agent_state: Record<string, unknown> | null;
   last_run: { id: string; started_at: string; finished_at: string | null; stats: SearchStats; query_results: QueryRunResult[] } | null;
 }
 
@@ -180,7 +182,11 @@ export async function getSession(id: string): Promise<SessionDetail | null> {
     };
   }
 
-  return { job: toJob(row), candidates, last_run, agent_transcript: Array.isArray(row.agentTranscript) ? (row.agentTranscript as unknown[]) : null };
+  // Stored either as a bare message array (early sessions) or as { messages, state }.
+  const at: any = row.agentTranscript;
+  const agent_transcript = Array.isArray(at) ? (at as unknown[]) : at && Array.isArray(at.messages) ? (at.messages as unknown[]) : null;
+  const agent_state = at && !Array.isArray(at) && at.state && typeof at.state === 'object' ? (at.state as Record<string, unknown>) : null;
+  return { job: toJob(row), candidates, last_run, agent_transcript, agent_state };
 }
 
 export interface SessionPatch {

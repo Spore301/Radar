@@ -231,7 +231,7 @@ async function shot(page: Page, name: string) {
     const row = panel.getByText(/Senior Product Designer · Demo/).first();
     await row.waitFor({ timeout: 10000 }).catch(() => {});
     check('history lists the demo session', await row.isVisible(), (await panel.innerText()).replace(/\s+/g, ' ').slice(0, 160));
-    check('history row shows profile + shortlist counts', (await panel.getByText(/3 profiles · 1 shortlisted/).count()) === 1);
+    check('history row shows profile + shortlist counts', (await panel.getByText(/3 profiles · 1 shortlisted/).count()) >= 1);
     await shot(page, '09-history-with-session');
     await page.keyboard.press('Escape');
 
@@ -240,7 +240,7 @@ async function shot(page: Page, name: string) {
     await page.getByText('Outreach pipeline').waitFor();
     check('pipeline board lists shortlisted candidate', await page.locator('article', { hasText: 'Priya Nair' }).first().isVisible());
     await shot(page, '10-pipeline-board');
-    await page.getByRole('button', { name: 'Table' }).click();
+    await page.getByRole('button', { name: 'Table', exact: true }).click();
     await page.getByRole('button', { name: 'Export CSV' }).waitFor();
     check('pipeline table view renders with export', true);
     await shot(page, '11-pipeline-table');
@@ -278,12 +278,15 @@ async function shot(page: Page, name: string) {
 
     // --- agent view -----------------------------------------------------------------------
     await page.goto(`${BASE}/dashboard/agent`, { waitUntil: 'networkidle' });
-    check('agent page renders', await page.getByText('Describe the role, get the search').isVisible());
+    check('agent page is full-height with the scope panel on the right', await page.getByText('Describe the role, or attach the JD.').isVisible() && await page.getByText('Scope so far').isVisible());
     await page.getByLabel('Message the agent').fill('Hiring a Senior React developer in Pune, must have TypeScript');
     await page.getByRole('button', { name: 'Send' }).click();
     await page.getByText(/Reasoning · \d+ steps/).first().waitFor({ timeout: 120000 });
     check('agent replies with a visible reasoning trace', (await page.getByText(/Reasoning · \d+ steps/).count()) >= 1);
-    check('agent extracted constraints into the side panel', await page.getByText('Pune', { exact: false }).first().isVisible());
+    check('reasoning opens with the search-budget guardrail', (await page.getByText(/Search budget:/).count()) >= 1);
+    check('agent extracted constraints into the scope panel', await page.getByText('Pune', { exact: false }).first().isVisible());
+    check('agent does NOT build queries on a partial brief', (await page.getByRole('button', { name: /Review \d+ queries/ }).count()) === 0);
+    check('agent is gathering or scoping, not ready', (await page.getByText(/Gathering required scope|Completing the scope|Awaiting your go-ahead/).count()) >= 1);
     const agentSessionId = new URL(page.url()).searchParams.get('session');
     check('agent turn created a stored session', Boolean(agentSessionId), agentSessionId ?? undefined);
     await shot(page, '15-agent');

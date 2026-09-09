@@ -4,18 +4,32 @@ import { callDeepSeekAPI, generateQueriesWithDeepSeek, heuristicParseJD, looksLi
 import { AGENT_SYSTEM_PROMPT } from '../ai/prompts';
 import { parseLocation } from '../search/location';
 import { isSoftSkill } from '../search/xrayTemplates';
+import { platformLabel } from '../search/platforms';
+import { missingFields, uncoveredScope, buildScope, decidePhase, GUARDRAIL, EMPTY_STATE } from './scope';
 import type { MergedConstraints, XRayQuery } from '../types';
-import type { AgentField, AgentMessage, AgentModelOutput, AgentQuestion, AgentTurnResponse } from './types';
+import type { AgentField, AgentMessage, AgentModelOutput, AgentPhase, AgentQuestion, AgentState, AgentTurnResponse, ScopeItem } from './types';
 
 // ---------------------------------------------------------------------------
 // Agent engine — one conversational turn.
 //
-// Deterministic frame, model in the middle: the engine owns what "complete"
-// means, merges the model's extraction into the session's constraints without
-// letting it overwrite confirmed values with blanks, decides readiness itself,
-// and generates the same approved query bundle the dashboard would. With no
-// DeepSeek key the extraction falls back to the heuristic parser and a fixed
-// question catalogue, so the agent still works keyless.
+// The governing rule, enforced here in code rather than left to the model:
+//
+//   "Searches are expensive. I shall not initiate query creation until I have
+//    the full scope of the recruitment."
+//
+// Every SerpAPI page is a credit, so the engine walks four phases and only
+// builds queries in the last one:
+//   gathering  → a required field is missing (title, location/remote, a hard
+//                skill or domain)
+//   scoping    → required fields present; extended scope (seniority, years,
+//                nice-to-haves, domain, exclusions, platforms) not yet covered
+//   confirming → everything covered; the agent summarises and asks for a
+//                go-ahead
+//   ready      → the recruiter explicitly confirmed; queries are generated
+//
+// The model supplies extraction, wording and its own read of the phase; the
+// engine merges, decides the phase, and can only move a model's read
+// backwards, never forwards.
 // ---------------------------------------------------------------------------
 
 export type AgentStage = (key: 'read' | 'extract' | 'reason' | 'queries' | 'save', label: string) => void;
@@ -33,6 +47,7 @@ export interface AgentTurnInput {
 const now = () => new Date().toISOString();
 const mid = () => `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
+
 const EMPTY: MergedConstraints = {
   job_title: '',
   role_type: 'Other',
@@ -49,7 +64,14 @@ const EMPTY: MergedConstraints = {
   results_cap: 50,
 };
 
+
+
 const uniq = (xs: string[]) => Array.from(new Map(xs.map((x) => [x.trim().toLowerCase(), x.trim()])).values()).filter(Boolean);
+
+const CONFIRM_RE = /^\s*(yes|yep|yeah|ok(ay)?|sure|go ahead|proceed|build( the queries| it| them)?|do it|looks good|lgtm|confirm(ed)?|start( the search)?|run it|let'?s go)\b[.!\s]*$/i;
+const DECLINE_RE = /^\s*(none|no|nothing( else| more)?|n\/a|skip|not (applicable|needed)|any|doesn'?t matter|no preference|default(s)?( are fine)?|that'?s all|nope)\b[.!\s]*$/i;
+
+// --- merging ------------------------------------------------------------------
 
 /** Merge model output into the running constraints; blanks never overwrite values. */
 function mergeConstraints(prev: MergedConstraints, next: AgentModelOutput['constraints']): MergedConstraints {
@@ -76,77 +98,115 @@ function mergeConstraints(prev: MergedConstraints, next: AgentModelOutput['const
   if (next.domain?.length) out.domain = uniq([...prev.domain, ...next.domain]).slice(0, 6);
   if (next.selected_platforms?.length) out.selected_platforms = sanitizeSelectedPlatforms(next.selected_platforms, out.role_type);
   if (typeof next.additional_details === 'string' && next.additional_details.trim()) {
-    out.additional_details = [prev.additional_details, next.additional_details.trim()].filter(Boolean).join('\n');
+    out.additional_details = uniq([...(prev.additional_details ?? '').split('\n'), next.additional_details.trim()]).join('\n');
   }
   if (out.selected_platforms.length === 0) out.selected_platforms = defaultPlatformsForRole(out.role_type);
   return out;
 }
 
-/** The engine's own definition of "enough to search" — never delegated to the model. */
-export function missingFields(c: MergedConstraints): AgentField[] {
-  const missing: AgentField[] = [];
-  if (!c.job_title.trim()) missing.push('job_title');
-  if (!c.location.trim() && !c.remote_eligible) missing.push('location');
-  if (c.must_have_skills.filter((s) => !isSoftSkill(s)).length === 0 && c.domain.length === 0) missing.push('must_have_skills');
-  return missing;
-}
+// Scope logic lives in ./scope so the chat panel can rebuild it client-side.
+
+// --- questions --------------------------------------------------------------------
 
 const QUESTION_CATALOGUE: Record<AgentField, AgentQuestion> = {
   job_title: { id: 'q-title', field: 'job_title', text: 'What is the exact job title you are hiring for?' },
   location: { id: 'q-location', field: 'location', text: 'Which city should candidates be in — or is the role remote?', options: ['Remote'] },
-  seniority: { id: 'q-seniority', field: 'seniority', text: 'How senior is the role?', options: ['Junior', 'Mid', 'Senior', 'Staff', 'Lead'] },
   must_have_skills: { id: 'q-skills', field: 'must_have_skills', text: 'Which one to three hard skills or tools are non-negotiable? If none, name the industry or domain instead.' },
-  domain: { id: 'q-domain', field: 'domain', text: 'Which industry or domain should candidates come from?' },
-  selected_platforms: { id: 'q-platforms', field: 'selected_platforms', text: 'Which platforms should I search?' },
-  additional_details: { id: 'q-details', field: 'additional_details', text: 'Anything that must or must not appear on a profile — exact phrases, companies to avoid, profile types to exclude?' },
-  years_of_experience: { id: 'q-years', field: 'years_of_experience', text: 'How many years of experience?' },
+  seniority: { id: 'q-seniority', field: 'seniority', text: 'How senior is the role?', options: ['Junior', 'Mid', 'Senior', 'Staff', 'Lead', 'Any'] },
+  years_of_experience: { id: 'q-years', field: 'years_of_experience', text: 'How many years of experience should they have?', options: ['0–2', '2–5', '5–8', '8+', 'Any'] },
+  domain: { id: 'q-domain', field: 'domain', text: 'Which industry or domain should candidates come from?', options: ['None in particular'] },
+  additional_details: { id: 'q-details', field: 'additional_details', text: 'Anything that must appear on a profile, or must not — exact phrases, companies to avoid, profile types to exclude (agencies, freelancers, students)?', options: ['None'] },
+  selected_platforms: { id: 'q-platforms', field: 'selected_platforms', text: 'I plan to search these platforms. Keep them, or name the ones you want?', options: ['Keep them'] },
 };
 
-/** Keyless fallback: heuristic extraction from everything the recruiter has said, plus catalogue questions. */
-function heuristicTurn(prev: MergedConstraints, userText: string, jdText: string | null | undefined): AgentModelOutput {
-  const thoughts: string[] = [];
-  const source = [jdText ?? '', userText].filter(Boolean).join('\n\n');
-  let extracted: AgentModelOutput['constraints'] = {};
+function questionFor(field: AgentField, c: MergedConstraints): AgentQuestion {
+  const q = QUESTION_CATALOGUE[field];
+  if (field === 'selected_platforms') return { ...q, text: `I plan to search ${c.selected_platforms.map(platformLabel).join(', ')}. Keep them, or name the ones you want?` };
+  return q;
+}
 
-  if (source.trim()) {
-    const padded = source.split(/\s+/).length < 25 ? `${source}\n\nrole requirements skills experience` : source; // let short prompts through the JD sanity gate
-    const h = heuristicParseJD(padded);
-    const c = h.merged_constraints;
-    thoughts.push(jdText ? `Read the attached description (${source.split(/\s+/).length} words).` : 'Read the recruiter’s message.');
-    extracted = {
-      ...(c.job_title ? { job_title: c.job_title } : {}),
-      role_type: c.role_type,
-      ...(c.seniority !== 'Any' ? { seniority: c.seniority } : {}),
-      ...(c.location ? { location: c.location } : {}),
-      ...(c.remote_eligible ? { remote_eligible: true } : {}),
-      ...(c.must_have_skills.length ? { must_have_skills: c.must_have_skills } : {}),
-      ...(c.nice_to_have_skills.length ? { nice_to_have_skills: c.nice_to_have_skills } : {}),
-      ...(c.domain.length ? { domain: c.domain } : {}),
-    };
-    // A one-line answer to an open question: treat it as the value for the first missing field.
-    const gaps = missingFields(prev);
-    if (!extracted.job_title && gaps[0] === 'job_title' && userText.split(/\s+/).length <= 8) extracted.job_title = userText.trim();
-    if (!extracted.location && gaps.includes('location') && parseLocation(userText).display) extracted.location = userText.trim();
-    if (!extracted.must_have_skills && gaps.includes('must_have_skills') && !gaps.includes('job_title') && userText.split(/[,/]|\band\b/).length <= 4 && userText.split(/\s+/).length <= 12) {
-      extracted.must_have_skills = userText.split(/[,/]|\band\b/).map((s) => s.trim()).filter(Boolean);
+function scopeSummary(c: MergedConstraints): string {
+  const bits = [
+    `${c.seniority !== 'Any' ? `${c.seniority} ` : ''}${c.job_title}`,
+    c.location ? `in ${c.location}${c.remote_eligible ? ' (remote OK)' : ''}` : c.remote_eligible ? 'remote' : '',
+    c.must_have_skills.length ? `must have ${c.must_have_skills.join(', ')}` : '',
+    c.domain.length ? `in ${c.domain.join(' / ')}` : '',
+    !(c.years_of_experience.min === 0 && c.years_of_experience.max === 10) ? `${c.years_of_experience.min}–${c.years_of_experience.max} years` : '',
+    c.additional_details?.trim() ? `with: ${c.additional_details.trim().replace(/\n/g, '; ')}` : 'no extra exclusions',
+    `across ${c.selected_platforms.map(platformLabel).join(', ')}`,
+  ].filter(Boolean);
+  return `Here is the full scope: ${bits.join(' · ')}. Each query costs search credits, so I have not built anything yet — shall I build the queries now?`;
+}
+
+// --- interpreting a reply against what was asked -----------------------------------
+
+/** Years band options → numbers. */
+function parseYears(text: string): { min: number; max: number } | null {
+  const m = text.match(/(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})/);
+  if (m) return { min: +m[1], max: +m[2] };
+  const plus = text.match(/(\d{1,2})\s*\+/);
+  if (plus) return { min: +plus[1], max: +plus[1] + 5 };
+  return null;
+}
+
+/**
+ * Deterministic reading of a short reply to the last question(s) asked —
+ * runs with or without the model so a one-word answer always lands.
+ */
+function applyReplyToAsked(prev: MergedConstraints, state: AgentState, lastAsked: AgentField[], text: string): { constraints: MergedConstraints; covered: AgentField[]; declined: boolean } {
+  const c = { ...prev };
+  const covered: AgentField[] = [];
+  const t = text.trim();
+  const declined = DECLINE_RE.test(t);
+  for (const f of lastAsked) {
+    covered.push(f);
+    if (declined) continue;
+    if (f === 'seniority') {
+      const m = t.match(/\b(junior|mid|senior|staff|lead|principal|executive|director|any)\b/i);
+      if (m) {
+        const v = m[1].toLowerCase();
+        c.seniority = v === 'principal' ? 'Staff' : v === 'director' ? 'Executive' : ((v[0].toUpperCase() + v.slice(1)) as MergedConstraints['seniority']);
+      }
+    } else if (f === 'years_of_experience') {
+      const y = parseYears(t);
+      if (y) c.years_of_experience = y;
+    } else if (f === 'location') {
+      const p = parseLocation(t);
+      if (p.display) c.location = p.display;
+      if (p.remote) c.remote_eligible = true;
+    } else if (f === 'job_title' && t.split(/\s+/).length <= 8) {
+      c.job_title = t;
+    } else if (f === 'must_have_skills' && t.split(/\s+/).length <= 14) {
+      c.must_have_skills = uniq([...c.must_have_skills, ...t.split(/[,/]|\band\b/).map((x) => x.trim()).filter((x) => x && !isSoftSkill(x))]);
+    } else if (f === 'domain' && t.split(/\s+/).length <= 10) {
+      c.domain = uniq([...c.domain, ...t.split(/[,/]|\band\b/).map((x) => x.trim()).filter(Boolean)]).slice(0, 6);
+    } else if (f === 'additional_details') {
+      c.additional_details = uniq([...(c.additional_details ?? '').split('\n'), t]).join('\n');
+    } else if (f === 'selected_platforms') {
+      const named = sanitizeSelectedPlatforms(t.split(/[,/]|\band\b/).map((x) => x.trim()), c.role_type);
+      if (!/keep/i.test(t) && named.length) c.selected_platforms = named;
     }
-    const got = Object.keys(extracted).filter((k) => k !== 'role_type');
-    thoughts.push(got.length ? `Extracted: ${got.join(', ')}.` : 'Found nothing new to extract from this message.');
   }
+  return { constraints: c, covered, declined };
+}
 
-  const merged = mergeConstraints(prev, extracted);
-  const missing = missingFields(merged);
-  const questions = missing.slice(0, 2).map((f) => QUESTION_CATALOGUE[f]);
-  if (missing.length) thoughts.push(`Still missing: ${missing.map((m) => m.replace(/_/g, ' ')).join(', ')} — asking for ${questions.length === 1 ? 'it' : 'them'} before searching.`);
-  else thoughts.push('Title, location and a searchable skill or domain are all present — building the approved query bundle.');
+// --- keyless fallback -----------------------------------------------------------------
 
-  const reply = missing.length
-    ? questions.length === 1
-      ? questions[0].text
-      : 'Two things before I search:'
-    : `Constraints are complete for ${merged.job_title}${merged.location ? ` in ${merged.location}` : ''}. Building the queries now.`;
-
-  return { thoughts, constraints: extracted, questions, reply, ready: missing.length === 0 };
+function heuristicTurn(prev: MergedConstraints, userText: string, jdText: string | null | undefined): AgentModelOutput['constraints'] {
+  const source = [jdText ?? '', userText].filter(Boolean).join('\n\n');
+  if (!source.trim()) return {};
+  const padded = source.split(/\s+/).length < 25 ? `${source}\n\nrole requirements skills experience` : source;
+  const c = heuristicParseJD(padded).merged_constraints;
+  return {
+    ...(c.job_title ? { job_title: c.job_title } : {}),
+    role_type: c.role_type,
+    ...(c.seniority !== 'Any' ? { seniority: c.seniority } : {}),
+    ...(c.location ? { location: c.location } : {}),
+    ...(c.remote_eligible ? { remote_eligible: true } : {}),
+    ...(c.must_have_skills.length ? { must_have_skills: c.must_have_skills } : {}),
+    ...(c.nice_to_have_skills.length ? { nice_to_have_skills: c.nice_to_have_skills } : {}),
+    ...(c.domain.length ? { domain: c.domain } : {}),
+  };
 }
 
 function coerceModelOutput(raw: any): AgentModelOutput | null {
@@ -159,8 +219,9 @@ function coerceModelOutput(raw: any): AgentModelOutput | null {
         .slice(0, 2)
         .map((q: any, i: number) => ({ id: typeof q.id === 'string' ? q.id : `q-${i}`, field: q.field as AgentField, text: q.text.trim(), options: strs(q.options, 6) }))
     : [];
+  const phase = ['gathering', 'scoping', 'confirming', 'ready'].includes(raw.phase) ? (raw.phase as AgentPhase) : undefined;
   return {
-    thoughts: strs(raw.thoughts, 6),
+    thoughts: strs(raw.thoughts, 7),
     constraints: {
       ...(typeof c.job_title === 'string' ? { job_title: c.job_title } : {}),
       ...(typeof c.role_type === 'string' ? { role_type: c.role_type } : {}),
@@ -176,17 +237,22 @@ function coerceModelOutput(raw: any): AgentModelOutput | null {
     },
     questions,
     reply: typeof raw.reply === 'string' ? raw.reply.trim() : '',
+    phase,
+    confirms_build: raw.confirms_build === true,
     ready: Boolean(raw.ready),
   };
 }
+
+// --- the turn -------------------------------------------------------------------------
 
 export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResponse> {
   const { userId, text, jdText, onStage } = input;
   const apiKey = input.deepseekKey || process.env.DEEPSEEK_API_KEY || null;
 
-  // --- load or start the session --------------------------------------------
+  // --- load or start ---------------------------------------------------------------
   let sessionId = input.sessionId;
   let prev: MergedConstraints = EMPTY;
+  let state: AgentState = { ...EMPTY_STATE };
   let transcript: AgentMessage[] = [];
   let rawJd = '';
   if (sessionId) {
@@ -194,6 +260,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
     if (!detail) throw new Error('Session not found.');
     prev = { ...EMPTY, ...detail.job.merged_constraints };
     transcript = (detail.agent_transcript ?? []) as AgentMessage[];
+    state = { ...EMPTY_STATE, ...((detail.agent_state as Partial<AgentState> | null) ?? {}) };
     rawJd = detail.job.raw_jd_text;
   }
 
@@ -212,43 +279,99 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
     ...(jdText && input.attachmentName ? { attachment: { name: input.attachmentName, words: jdText.split(/\s+/).length } } : {}),
   };
 
-  // --- extract + reason -------------------------------------------------------
+  // What did we ask last time? A reply to it counts as covering that field.
+  const lastAssistant = [...transcript].reverse().find((m) => m.role === 'assistant');
+  const lastAsked = (lastAssistant?.questions ?? []).map((q) => q.field);
+  const wasConfirming = lastAssistant?.phase === 'confirming';
+
+  // --- deterministic read of the reply, then the model ------------------------------
+  const replied = applyReplyToAsked(prev, state, lastAsked, userMessage.content);
+  let constraints = replied.constraints;
+  const covered = new Set<AgentField>([...state.coveredFields, ...replied.covered]);
+
   onStage?.('extract', apiKey ? 'Extracting constraints with DeepSeek…' : 'Extracting constraints…');
   let out: AgentModelOutput | null = null;
   if (apiKey) {
     const convo = transcript
-      .slice(-10)
+      .slice(-12)
       .map((m) => `${m.role === 'user' ? 'Recruiter' : 'Agent'}: ${m.content}`)
       .join('\n');
-    const prompt = `<CURRENT_CONSTRAINTS>\n${JSON.stringify(prev)}\n</CURRENT_CONSTRAINTS>\n<CONVERSATION>\n${convo || '(start)'}\n</CONVERSATION>\n<USER_MESSAGE>\n${userMessage.content}\n</USER_MESSAGE>\n${
-      jdText ? `<JD_TEXT>\n${jdText.slice(0, 7000)}\n</JD_TEXT>\n` : ''
-    }<PLATFORMS>LinkedIn, GitHub, StackOverflow, Wellfound, Behance, Dribbble, Xing, Resumes, MultiSite</PLATFORMS>`;
+    const prompt =
+      `<CURRENT_CONSTRAINTS>\n${JSON.stringify(constraints)}\n</CURRENT_CONSTRAINTS>\n` +
+      `<STATE>\n${JSON.stringify({ askedFields: state.askedFields, coveredFields: Array.from(covered), confirmed: state.confirmed, lastPhase: state.phase, lastAsked, wasConfirming })}\n</STATE>\n` +
+      `<CONVERSATION>\n${convo || '(start)'}\n</CONVERSATION>\n<USER_MESSAGE>\n${userMessage.content}\n</USER_MESSAGE>\n` +
+      (jdText ? `<JD_TEXT>\n${jdText.slice(0, 7000)}\n</JD_TEXT>\n` : '') +
+      `<PLATFORMS>LinkedIn, GitHub, StackOverflow, Wellfound, Behance, Dribbble, Xing, Resumes, MultiSite</PLATFORMS>`;
     out = coerceModelOutput(await callDeepSeekAPI<any>(prompt, AGENT_SYSTEM_PROMPT, apiKey, { timeoutMs: 75_000, retries: 1 }));
   }
-  onStage?.('reason', 'Checking what is still missing…');
-  if (!out) out = heuristicTurn(prev, userMessage.content, jdText);
+  const extracted = out?.constraints ?? heuristicTurn(prev, userMessage.content, jdText);
+  constraints = mergeConstraints(constraints, extracted);
 
-  const constraints = mergeConstraints(prev, out.constraints);
-  const missing = missingFields(constraints);
-  const ready = missing.length === 0; // the engine decides, not the model
-  const questions = ready ? [] : out.questions.length ? out.questions : missing.slice(0, 2).map((f) => QUESTION_CATALOGUE[f]);
-  const thoughts = out.thoughts.length ? out.thoughts : heuristicTurn(prev, userMessage.content, jdText).thoughts;
+  // --- consent: explicit only ---------------------------------------------------------
+  onStage?.('reason', 'Checking the scope against the search-budget guardrail…');
+  const userConfirms = CONFIRM_RE.test(userMessage.content) || /^build the queries$/i.test(userMessage.content.trim()) || (out?.confirms_build === true && CONFIRM_RE.test(userMessage.content.split(/[.!?]/)[0] ?? ''));
+  let confirmed = state.confirmed;
+  if (wasConfirming && userConfirms) confirmed = true;
+  // New information after a confirmation request re-opens the scope: the recruiter changed something.
+  if (wasConfirming && !userConfirms && Object.keys(extracted).filter((k) => k !== 'role_type').length > 0) confirmed = false;
 
-  // --- queries when complete ---------------------------------------------------
-  let queries: XRayQuery[] = [];
-  if (ready) {
-    onStage?.('queries', 'Filling the approved X-Ray templates…');
-    queries = await generateQueriesWithDeepSeek(constraints, apiKey ?? undefined);
+  const nextState: AgentState = {
+    askedFields: uniq([...state.askedFields, ...lastAsked]) as AgentField[],
+    coveredFields: Array.from(covered),
+    confirmed,
+    phase: 'gathering',
+  };
+  const phase = decidePhase(constraints, nextState);
+  nextState.phase = phase;
+  const ready = phase === 'ready';
+
+  // --- what to ask / say ----------------------------------------------------------------
+  let questions: AgentQuestion[] = [];
+  let reply = '';
+  if (phase === 'gathering') {
+    const fields = missingFields(constraints).slice(0, 2);
+    const modelQs = (out?.questions ?? []).filter((q) => fields.includes(q.field));
+    questions = modelQs.length ? modelQs : fields.map((f) => questionFor(f, constraints));
+    reply = out?.reply && out.phase !== 'ready' ? out.reply : questions.length === 1 ? questions[0].text : 'Two things before anything else:';
+  } else if (phase === 'scoping') {
+    const fields = uncoveredScope(constraints, nextState).slice(0, 2);
+    const modelQs = (out?.questions ?? []).filter((q) => fields.includes(q.field));
+    questions = modelQs.length ? modelQs : fields.map((f) => questionFor(f, constraints));
+    reply = out?.reply && (out.phase === 'scoping' || out.phase === 'gathering') ? out.reply : `Required details are in. Before I spend credits on a search, a bit more scope:`;
+  } else if (phase === 'confirming') {
+    questions = [{ id: 'q-confirm', field: 'additional_details', text: 'Shall I build the queries now?', options: ['Build the queries', 'Change something'] }];
+    reply = scopeSummary(constraints);
   }
 
-  const reply =
-    out.reply ||
-    (ready ? `Constraints are complete for ${constraints.job_title}. ${queries.length} queries are ready to review.` : questions[0]?.text || 'Tell me more about the role.');
+  // --- build only when ready -------------------------------------------------------------
+  let queries: XRayQuery[] = [];
+  if (ready) {
+    onStage?.('queries', 'Scope confirmed — filling the approved X-Ray templates…');
+    queries = await generateQueriesWithDeepSeek(constraints, apiKey ?? undefined);
+    reply = `Scope confirmed. ${queries.length} queries are ready to review across ${constraints.selected_platforms.map(platformLabel).join(', ')}. Nothing has been searched yet — review them, then run.`;
+  }
 
-  const assistant: AgentMessage = { id: mid(), role: 'assistant', content: reply, at: now(), thoughts, questions, constraints, ready };
+  // --- reasoning trace: guardrail first, always ---------------------------------------------
+  const missing = missingFields(constraints);
+  const uncovered = uncoveredScope(constraints, nextState);
+  const thoughts: string[] = [
+    `Search budget: ${GUARDRAIL} Phase is "${phase}".`,
+    jdText ? `Read the attached job description (${jdText.split(/\s+/).length} words).` : `Read the recruiter's message${lastAsked.length ? ` as an answer about ${lastAsked.map((f) => f.replace(/_/g, ' ')).join(' and ')}` : ''}.`,
+    ...(out?.thoughts ?? []).filter((t) => !/^search budget/i.test(t)).slice(0, 3),
+    missing.length
+      ? `Still missing required scope: ${missing.map((m) => m.replace(/_/g, ' ')).join(', ')} — cannot search without it.`
+      : uncovered.length
+        ? `Required scope is complete; still to cover: ${uncovered.map((m) => m.replace(/_/g, ' ')).join(', ')}.`
+        : confirmed
+          ? 'Full scope gathered and the recruiter has confirmed — building queries now.'
+          : 'Full scope gathered; summarising it and asking for a go-ahead before spending any credits.',
+    questions.length && phase !== 'confirming' ? `Asking about ${questions.map((q) => q.field.replace(/_/g, ' ')).join(' and ')}.` : '',
+  ].filter(Boolean);
+
+  const assistant: AgentMessage = { id: mid(), role: 'assistant', content: reply, at: now(), thoughts, questions, constraints, ready, phase };
   const nextTranscript = [...transcript, userMessage, assistant];
 
-  // --- persist ------------------------------------------------------------------
+  // --- persist ----------------------------------------------------------------------------
   onStage?.('save', 'Saving the session…');
   const title = constraints.job_title ? `${constraints.job_title}${constraints.location ? ` · ${constraints.location.split(',')[0]}` : ''}` : 'Untitled role · agent';
   if (!sessionId) {
@@ -277,7 +400,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
     await updateSession(sessionId, { merged_constraints: constraints, ...(queries.length ? { query_bundle: queries } : {}), title });
     if (jdText) await prisma.job.update({ where: { id: sessionId }, data: { rawJdText: jdText } });
   }
-  await prisma.job.update({ where: { id: sessionId }, data: { agentTranscript: JSON.parse(JSON.stringify(nextTranscript)) } });
+  await prisma.job.update({ where: { id: sessionId }, data: { agentTranscript: JSON.parse(JSON.stringify({ messages: nextTranscript, state: nextState })) } });
 
-  return { sessionId, message: assistant, constraints, missing, ready, queries, transcript: nextTranscript };
+  return { sessionId, message: assistant, constraints, missing, scope: buildScope(constraints, nextState), phase, ready, queries, transcript: nextTranscript, state: nextState };
 }

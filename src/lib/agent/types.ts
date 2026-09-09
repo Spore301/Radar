@@ -37,10 +37,37 @@ export interface AgentMessage {
   questions?: AgentQuestion[];
   /** Assistant only: constraints as of this turn. */
   constraints?: MergedConstraints;
-  /** Assistant only: true once the constraints are complete and queries exist. */
+  /** Assistant only: true once the scope is confirmed and queries exist. */
   ready?: boolean;
+  /** Assistant only: conversation phase after this turn. */
+  phase?: AgentPhase;
   /** User only: a JD file that was attached with this message. */
   attachment?: AgentAttachment;
+}
+
+/**
+ * Where the conversation is. Queries are built only in 'ready', which needs
+ * every required field, the extended scope covered, AND the recruiter's
+ * explicit go-ahead — searches cost credits, so the agent never starts them
+ * on a partial brief.
+ */
+export type AgentPhase = 'gathering' | 'scoping' | 'confirming' | 'ready';
+
+export interface ScopeItem {
+  field: AgentField | 'confirmation';
+  label: string;
+  /** 'done' = present or explicitly declined; 'pending' = still to gather; 'optional' = nice to have. */
+  state: 'done' | 'pending' | 'optional';
+  value?: string;
+}
+
+/** Conversation memory the engine keeps beside the transcript. */
+export interface AgentState {
+  /** Fields the agent has asked about; a reply to an asked field counts as covered even if the answer was "none". */
+  askedFields: AgentField[];
+  coveredFields: AgentField[];
+  confirmed: boolean;
+  phase: AgentPhase;
 }
 
 export interface AgentTurnResponse {
@@ -48,10 +75,13 @@ export interface AgentTurnResponse {
   message: AgentMessage;
   constraints: MergedConstraints;
   missing: AgentField[];
+  scope: ScopeItem[];
+  phase: AgentPhase;
   ready: boolean;
   queries: XRayQuery[];
   /** Full transcript after this turn, as stored on the session. */
   transcript: AgentMessage[];
+  state: AgentState;
 }
 
 /** What the model must return for one turn. Everything else is derived server-side. */
@@ -72,5 +102,9 @@ export interface AgentModelOutput {
   }>;
   questions: AgentQuestion[];
   reply: string;
+  /** The model's read of the phase; the engine verifies it and can only move it backwards. */
+  phase?: AgentPhase;
+  /** True when the recruiter's latest message is a go-ahead to build queries. */
+  confirms_build?: boolean;
   ready: boolean;
 }

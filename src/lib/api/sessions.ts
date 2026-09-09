@@ -42,6 +42,7 @@ export interface SessionDetailResponse {
   job: Job;
   candidates: CandidateProfile[];
   agent_transcript?: unknown[] | null;
+  agent_state?: Record<string, unknown> | null;
   last_run: {
     id: string;
     started_at: string;

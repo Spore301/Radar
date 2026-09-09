@@ -162,8 +162,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       {/* Content */}
-      <main className="flex-1 min-w-0">
-        <div className="max-w-content mx-auto px-5 sm:px-8 py-6 sm:py-8">{children}</div>
+      <main className="flex-1 min-w-0 flex flex-col">
+        {pathname.startsWith('/dashboard/agent') ? (
+          // The agent is a full-height chat surface, like a messaging app: no centred column, no page padding.
+          <div className="flex-1 min-h-0 lg:h-screen flex flex-col">{children}</div>
+        ) : (
+          <div className="max-w-content mx-auto w-full px-5 sm:px-8 py-6 sm:py-8">{children}</div>
+        )}
       </main>
     </div>
   );
