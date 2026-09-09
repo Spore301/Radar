@@ -39,7 +39,7 @@ function toJson<T>(value: T): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
-function djb2(input: string): string {
+export function djb2(input: string): string {
   let h = 5381;
   for (let i = 0; i < input.length; i++) h = ((h << 5) + h + input.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16);
@@ -246,6 +246,68 @@ function candidateKey(c: CandidateProfile): string {
  * (status, notes, tags, follow-up), so a shortlist survives a re-search.
  * Returns the session's full candidate list as stored (with DB ids).
  */
+/**
+ * Upserts every indexed profile onto the session and returns the session's
+ * full, freshly-ordered candidate list. Shared by the synchronous recorder and
+ * by the background run worker, so both paths persist identically.
+ *
+ * Batched into one transaction: a half-written run must never leave the
+ * session with a partial candidate list. The recruiter's own columns (status,
+ * notes, tags, follow-up) are never touched — only scraped fields.
+ */
+export async function persistRunCandidates(
+  jobId: string,
+  runId: string,
+  tier: 'free' | 'precision',
+  candidates: CandidateProfile[]
+): Promise<CandidateProfile[]> {
+  // Upsert every indexed profile. Batched into one transaction so a half-
+  // written run can't leave the session with a partial candidate list.
+  await prisma.$transaction(
+    candidates.map((c) => {
+      const scraped = {
+        name: c.name,
+        headline: c.headline,
+        platform: c.platform,
+        avatarUrl: c.avatar_url ?? null,
+        skillsDetected: toJson(c.skills_detected),
+        experienceYearsEstimated: c.experience_years_estimated ?? null,
+        summarySnippet: c.summary_snippet,
+        matchScore: c.match_score,
+        matchBreakdown: toJson(c.match_breakdown),
+        matchRationale: c.match_rationale,
+        missingSignals: toJson(c.missing_signals),
+        dataCompleteness: c.data_completeness,
+        rawScrapedData: c.raw_scraped_data ? toJson(c.raw_scraped_data) : undefined,
+        sourceQueryId: c.source_query ?? null,
+        sourceRunId: runId,
+        sourceTier: tier,
+        scrapeStatus: c.scrape_status,
+      };
+      return prisma.candidate.upsert({
+        where: { jobId_profileUrlCanonical: { jobId, profileUrlCanonical: candidateKey(c) } },
+        create: {
+          ...scraped,
+          jobId,
+          location: c.location,
+          profileUrl: c.profile_url,
+          profileUrlCanonical: candidateKey(c),
+          status: 'New',
+          discoveredAt: new Date(c.discovered_at),
+        },
+        // Location is only overwritten when the new run actually found one.
+        update: c.location && !/not specified/i.test(c.location) ? { ...scraped, location: c.location } : scraped,
+      });
+    })
+  );
+
+  const total = await prisma.candidate.count({ where: { jobId } });
+  await prisma.job.update({ where: { id: jobId }, data: { status: 'complete', candidateCount: total } });
+
+  const rows = await prisma.candidate.findMany({ where: { jobId }, orderBy: [{ matchScore: 'desc' }, { name: 'asc' }] });
+  return rows.map(toCandidateProfile);
+}
+
 export async function recordSearchRun(
   jobId: string,
   userId: string | null,
@@ -291,52 +353,9 @@ export async function recordSearchRun(
     },
   });
 
-  // Upsert every indexed profile. Batched into one transaction so a half-
-  // written run can't leave the session with a partial candidate list.
-  await prisma.$transaction(
-    result.candidates.map((c) => {
-      const scraped = {
-        name: c.name,
-        headline: c.headline,
-        platform: c.platform,
-        avatarUrl: c.avatar_url ?? null,
-        skillsDetected: toJson(c.skills_detected),
-        experienceYearsEstimated: c.experience_years_estimated ?? null,
-        summarySnippet: c.summary_snippet,
-        matchScore: c.match_score,
-        matchBreakdown: toJson(c.match_breakdown),
-        matchRationale: c.match_rationale,
-        missingSignals: toJson(c.missing_signals),
-        dataCompleteness: c.data_completeness,
-        rawScrapedData: c.raw_scraped_data ? toJson(c.raw_scraped_data) : undefined,
-        sourceQueryId: c.source_query ?? null,
-        sourceRunId: run.id,
-        sourceTier: tier as 'free' | 'precision',
-        scrapeStatus: c.scrape_status,
-      };
-      return prisma.candidate.upsert({
-        where: { jobId_profileUrlCanonical: { jobId, profileUrlCanonical: candidateKey(c) } },
-        create: {
-          ...scraped,
-          jobId,
-          location: c.location,
-          profileUrl: c.profile_url,
-          profileUrlCanonical: candidateKey(c),
-          status: 'New',
-          discoveredAt: new Date(c.discovered_at),
-        },
-        // Location is only overwritten when the new run actually found one.
-        update: c.location && !/not specified/i.test(c.location) ? { ...scraped, location: c.location } : scraped,
-      });
-    })
-  );
-
-  const total = await prisma.candidate.count({ where: { jobId } });
-  await prisma.job.update({ where: { id: jobId }, data: { status: 'complete', candidateCount: total } });
-
-  const rows = await prisma.candidate.findMany({ where: { jobId }, orderBy: [{ matchScore: 'desc' }, { name: 'asc' }] });
-  return { runId: run.id, candidates: rows.map(toCandidateProfile) };
+  return { runId: run.id, candidates: await persistRunCandidates(jobId, run.id, tier, result.candidates) };
 }
+
 
 // --- Candidates --------------------------------------------------------------
 

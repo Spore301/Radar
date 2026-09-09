@@ -161,11 +161,42 @@ async function shot(page: Page, name: string) {
     await overlay.waitFor({ timeout: 10000 });
     check('processing overlay appears with per-query rows', (await overlay.getByText(/queued|searching…/).count()) > 0);
     await shot(page, '05-overlay');
-    await overlay.waitFor({ state: 'detached', timeout: 180000 });
-    await page.getByText(/Query run receipt/).waitFor({ timeout: 10000 });
+
+    // --- async: stop waiting and the run keeps reporting in the popup ----------
+    check('overlay offers to run in the background', await overlay.getByRole('button', { name: 'Run in the background' }).isVisible());
+    await overlay.getByRole('button', { name: 'Run in the background' }).click();
+    await overlay.waitFor({ state: 'detached', timeout: 10000 });
+    const toaster = page.locator('[data-run-toaster]');
+    await toaster.waitFor({ timeout: 10000 });
+    check('progress popup takes over bottom-right', await toaster.isVisible());
+    const popupBox = await toaster.boundingBox();
+    const view = page.viewportSize()!;
+    check(
+      'popup is anchored bottom-right',
+      Boolean(popupBox && popupBox.x + popupBox.width > view.width - 60 && popupBox.y + popupBox.height > view.height - 60),
+      popupBox ? `x=${Math.round(popupBox.x)} y=${Math.round(popupBox.y)}` : 'no box'
+    );
+    check('popup names the session being searched', (await toaster.getByText(/Senior Product Designer/).count()) >= 1);
+    await shot(page, '05b-run-popup');
+
+    // The run outlives a full page reload, because its progress is in the DB.
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.locator('[data-run-toaster]').waitFor({ timeout: 15000 });
+    check('popup is restored after a reload', await page.locator('[data-run-toaster]').isVisible());
+    await page.locator('[data-run-toaster]').getByRole('button', { name: /query detail/ }).first().click();
+    await shot(page, '05c-run-popup-expanded');
+
+    const runs = await (await page.request.get(`${BASE}/api/search-runs`)).json();
+    check('GET /api/search-runs reports the run', Array.isArray(runs.runs) && runs.runs.length >= 1, `${runs.runs?.length} runs`);
+    check(
+      'run row carries per-query progress',
+      Array.isArray(runs.runs?.[0]?.queries) && runs.runs[0].queries.length === rows,
+      `${runs.runs?.[0]?.queries?.length} query rows`
+    );
+    await page.getByText(/Query run receipt/).waitFor({ timeout: 30000 });
     check('run finishes and shows the receipt', await page.getByText(/Query run receipt/).isVisible());
-    const statusText = await page.locator('[role="status"]').innerText();
-    check('status bar reports run outcome', /Run complete/.test(statusText), statusText.split('\n').pop());
+    const statusText = await page.locator('[role="status"]').first().innerText();
+    check('status bar reports the reopened session', statusText.trim().length > 0, statusText.split('\n').pop());
     await page.getByText(/Query run receipt/).click();
     check('receipt explains the SerpAPI failure per query', (await page.getByText(/Invalid API key|SerpAPI/i).count()) >= 1);
     await page.getByText(/Query run receipt/).click();

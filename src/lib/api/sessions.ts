@@ -88,45 +88,6 @@ export async function deleteSession(id: string): Promise<void> {
   await request<{ success: true }>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export interface RunSearchResponse {
-  runId: string;
-  candidates: CandidateProfile[];
-  stats: SearchStats;
-  queryResults: QueryRunResult[];
-}
-
-/**
- * Runs the bundle. The route streams progress (one event per query start /
- * finish, then a storing stage) before the final payload; pass `onEvent` to
- * drive a progress bar. `signal` lets the caller stop waiting — the server
- * still finishes and stores the run.
- */
-export async function runSearch(
-  input: {
-    jobId: string;
-    constraints: MergedConstraints;
-    queries: XRayQuery[];
-    apiKeys?: { deepseek?: string | null };
-    serpOptions?: SerpOptions;
-  },
-  onEvent?: (event: ProgressEvent) => void,
-  signal?: AbortSignal
-): Promise<RunSearchResponse> {
-  return postNdjson<RunSearchResponse>(
-    '/api/search-candidates',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(input.apiKeys?.deepseek ? { 'x-deepseek-api-key': input.apiKeys.deepseek } : {}),
-      },
-      body: JSON.stringify(input),
-      signal,
-    },
-    onEvent
-  );
-}
-
 export interface ParseJdResponse {
   raw_jd_text: string;
   word_count: number;

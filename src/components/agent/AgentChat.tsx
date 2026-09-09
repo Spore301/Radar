@@ -11,6 +11,7 @@ import * as api from '@/lib/api/sessions';
 import { notifySessionsChanged } from '@/lib/api/sessions';
 import { QueryPreviewModal } from '@/components/ingestion/QueryPreviewModal';
 import { ProcessingOverlay, ProcessingState, ProcessingLogItem } from '@/components/processing/ProcessingOverlay';
+import { useRunFinished, useRunTracker } from '@/components/runs/RunTracker';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { getTemplate } from '@/lib/search/xrayTemplates';
 import { platformLabel } from '@/lib/search/platforms';
@@ -47,6 +48,8 @@ export function AgentChat() {
   const [modalOpen, setModalOpen] = useState(false);
   const [processing, setProcessing] = useState<ProcessingState | null>(null);
   const [runSummary, setRunSummary] = useState<string | null>(null);
+  const tracker = useRunTracker();
+  const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -127,36 +130,78 @@ export function AgentChat() {
     setModalOpen(false);
     if (!sessionId || !constraints) return;
     setError(null);
-    const items: ProcessingLogItem[] = queriesToRun.map((q) => ({ id: q.id, platform: q.platform, label: getTemplate(q.query_type)?.label ?? 'Custom query', state: 'active', meta: 'queued' }));
-    setProcessing({ stage: 'search', title: `Running ${queriesToRun.length} X-Ray queries individually`, status: 'Connecting…', progress: 0, items, startedAt: Date.now() });
+    const items: ProcessingLogItem[] = queriesToRun.map((q) => ({
+      id: q.id,
+      platform: q.platform,
+      label: getTemplate(q.query_type)?.label ?? 'Custom query',
+      state: 'active',
+      meta: 'queued',
+    }));
+    setProcessing({
+      stage: 'search',
+      title: `Running ${queriesToRun.length} X-Ray queries individually`,
+      status: 'Starting the run on the server…',
+      progress: 0,
+      cancelLabel: 'Run in the background',
+      cancelNote: 'The search keeps running on the server. Close this and follow it in the progress popup, bottom right.',
+      items,
+      startedAt: Date.now(),
+    });
     try {
-      const data = await api.runSearch({ jobId: sessionId, constraints, queries: queriesToRun, apiKeys: api.readStoredApiKeys(), serpOptions: { maxPagesPerQuery: depth } }, (ev) => {
-        if (ev.type === 'query_done') {
-          const r = ev.result as QueryRunResult;
-          setProcessing((p) =>
-            p
-              ? {
-                  ...p,
-                  progress: (ev.done / ev.total) * 0.9,
-                  status: `${ev.done} of ${ev.total} queries done · ${ev.indexedSoFar} profiles indexed so far`,
-                  items: p.items?.map((it) => (it.id === r.queryId ? { ...it, state: r.status === 'completed' ? 'done' : r.status === 'skipped' ? 'skipped' : 'failed', meta: r.status === 'completed' ? `${r.indexedCount}/${r.resultCount}` : r.error?.slice(0, 40) || r.status } : it)),
-                }
-              : p
-          );
-        } else if (ev.type === 'query_start') {
-          setProcessing((p) => (p ? { ...p, status: `Searching ${platformLabel(ev.platform)} · ${getTemplate(ev.queryType)?.label ?? 'Custom'}…` } : p));
-        } else if (ev.type === 'stage') {
-          setProcessing((p) => (p ? { ...p, status: ev.label, progress: 0.95 } : p));
-        }
+      // Handed to the server as a background run: this resolves immediately.
+      const runId = await tracker.start({
+        jobId: sessionId,
+        constraints,
+        queries: queriesToRun,
+        apiKeys: api.readStoredApiKeys(),
+        serpOptions: { maxPagesPerQuery: depth },
       });
-      setProcessing(null);
-      setRunSummary(`Run complete · ${data.stats.queriesRun}/${data.stats.queriesRun + data.stats.queriesFailed} queries · ${data.stats.total} indexed · ${data.candidates.length} profiles stored${data.stats.creditsUsed ? ` · ${data.stats.creditsUsed} credits` : ''}`);
-      notifySessionsChanged();
+      setWatchedRunId(runId);
     } catch (e: any) {
       setProcessing(null);
-      setError(e?.message || 'The search run failed.');
+      setError(e?.message || 'The search run could not be started.');
     }
   };
+
+  // Claim the run while the overlay is up, so the popup does not double-report.
+  useEffect(() => {
+    if (!watchedRunId) return;
+    tracker.watch(watchedRunId);
+    return () => tracker.watch(null);
+  }, [watchedRunId, tracker]);
+
+  // Mirror the tracker's snapshot into the overlay.
+  useEffect(() => {
+    if (!watchedRunId) return;
+    const run = tracker.runs.find((r) => r.runId === watchedRunId);
+    if (!run) return;
+    setProcessing((p) =>
+      p
+        ? {
+            ...p,
+            status: run.statusText ?? p.status,
+            progress: run.progress,
+            items: p.items?.map((it) => {
+              const q = run.queries.find((x) => x.queryId === it.id);
+              if (!q) return it;
+              return {
+                ...it,
+                state: q.outcome === 'fetched' ? 'done' : q.outcome === 'skipped' ? 'skipped' : q.outcome === 'failed' ? 'failed' : 'active',
+                meta: q.outcome === 'fetched' ? `${q.keptCount}/${q.resultCount}` : q.outcome === 'running' ? 'searching…' : q.outcome === 'pending' ? 'queued' : q.error?.slice(0, 40) || q.outcome,
+              };
+            }),
+          }
+        : p
+    );
+  }, [watchedRunId, tracker.runs]);
+
+  useRunFinished((detail) => {
+    if (detail.jobId !== sessionId) return;
+    if (detail.runId === watchedRunId) setWatchedRunId(null);
+    setProcessing(null);
+    const run = tracker.runs.find((r) => r.runId === detail.runId);
+    setRunSummary(run?.statusText ?? 'Run finished.');
+  });
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -435,7 +480,13 @@ export function AgentChat() {
       )}
 
       <QueryPreviewModal isOpen={modalOpen} onClose={() => setModalOpen(false)} queries={queries} constraints={constraints} onConfirm={runSearch} isLoading={processing !== null} />
-      <ProcessingOverlay state={processing} onCancel={() => setProcessing(null)} />
+      <ProcessingOverlay
+        state={processing}
+        onCancel={() => {
+          setProcessing(null);
+          setWatchedRunId(null);
+        }}
+      />
     </div>
   );
 }

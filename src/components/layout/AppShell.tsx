@@ -7,6 +7,8 @@ import { useSession, signOut } from 'next-auth/react';
 import { Search, History, Users, FileText, Settings, LogOut, Radar, Sparkles, type LucideIcon } from 'lucide-react';
 import { Avatar } from '@/components/ui/Avatar';
 import { HistoryPanel } from '@/components/sessions/HistoryPanel';
+import { RunTrackerProvider } from '@/components/runs/RunTracker';
+import { RunToaster } from '@/components/runs/RunToaster';
 import * as api from '@/lib/api/sessions';
 import { SESSIONS_CHANGED_EVENT } from '@/lib/api/sessions';
 
@@ -80,7 +82,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isActive = (href: string) => (href === '/dashboard' ? pathname === '/dashboard' : pathname.startsWith(href));
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row">
+    <RunTrackerProvider>
+      <div className="min-h-screen flex flex-col lg:flex-row">
       {/* Sidebar */}
       <aside
         className="lg:w-[232px] lg:flex-shrink-0 lg:h-screen lg:sticky lg:top-0 bg-canvas border-b lg:border-b-0 lg:border-r border-hairline flex flex-col"
@@ -170,7 +173,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="max-w-content mx-auto w-full px-5 sm:px-8 py-6 sm:py-8">{children}</div>
         )}
       </main>
-    </div>
+        {/* Background search progress — bottom-right, survives every route change. */}
+        <RunToaster />
+      </div>
+    </RunTrackerProvider>
   );
 }
 

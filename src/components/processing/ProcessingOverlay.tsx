@@ -38,6 +38,10 @@ export interface ProcessingState {
   steps?: ProcessingStep[];
   items?: ProcessingLogItem[];
   detail?: string;
+  /** Overrides the dismiss button's label (default: "Stop waiting"). */
+  cancelLabel?: string;
+  /** Overrides the note beside it — say what happens to the work. */
+  cancelNote?: string;
   startedAt: number;
 }
 
@@ -160,9 +164,11 @@ export function ProcessingOverlay({ state, onCancel }: ProcessingOverlayProps) {
 
         {onCancel && (
           <div className="px-5 py-3 border-t border-hairline bg-canvas flex items-center justify-between gap-4">
-            <span className="text-body-xs text-mute">Stopping closes this view. Work already sent to the server still completes and is saved to the session.</span>
-            <button type="button" onClick={onCancel} className="btn-ghost btn-sm">
-              Stop waiting
+            <span className="text-body-xs text-mute">
+              {state.cancelNote ?? 'Stopping closes this view. Work already sent to the server still completes and is saved to the session.'}
+            </span>
+            <button type="button" onClick={onCancel} className="btn-ghost btn-sm whitespace-nowrap">
+              {state.cancelLabel ?? 'Stop waiting'}
             </button>
           </div>
         )}

@@ -112,6 +112,12 @@ function sanitizeQueries(queries: XRayQuery[]): { runnable: XRayQuery[]; skipped
 export interface SearchProgressHooks {
   onQueryStart?: (query: XRayQuery, index: number, total: number) => void;
   onQueryDone?: (result: QueryRunResult, done: number, total: number, indexedSoFar: number) => void;
+  /**
+   * Checked before each query is fired. Returning true stops the run without
+   * spending another credit; queries not yet started are reported as skipped,
+   * and profiles already found are still returned and stored.
+   */
+  shouldAbort?: () => boolean | Promise<boolean>;
 }
 
 export async function executeXRaySearch(
@@ -136,13 +142,35 @@ export async function executeXRaySearch(
     outcome: QueryRunResult;
     candidates: CandidateProfile[];
   }> => {
-    hooks?.onQueryStart?.(q, index, total);
     const finish = (entry: { outcome: QueryRunResult; candidates: CandidateProfile[] }) => {
       doneCount++;
       indexedSoFar += entry.candidates.length;
       hooks?.onQueryDone?.(entry.outcome, doneCount, total, indexedSoFar);
       return entry;
     };
+
+    // Stopping is checked here rather than mid-flight: a query already sent to
+    // SerpAPI is already paid for, so we let it land and refuse the next one.
+    if (hooks?.shouldAbort && (await hooks.shouldAbort())) {
+      return finish({
+        outcome: {
+          queryId: q.id,
+          platform: q.platform,
+          queryType: q.query_type,
+          queryString: q.query_string,
+          status: 'skipped',
+          provider: 'none',
+          resultCount: 0,
+          indexedCount: 0,
+          pagesFetched: 0,
+          creditsUsed: 0,
+          notice: 'Not run — the search was stopped.',
+        },
+        candidates: [],
+      });
+    }
+
+    hooks?.onQueryStart?.(q, index, total);
     try {
       const serp = await runSerpQuery(q.query_string, keys, serpOptions);
       const candidates: CandidateProfile[] = [];

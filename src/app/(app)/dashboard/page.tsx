@@ -12,6 +12,7 @@ import { CandidateDetailDrawer } from '@/components/candidates/CandidateDetailDr
 import { FilterPanel } from '@/components/candidates/FilterPanel';
 import { OutreachGeneratorModal } from '@/components/outreach/OutreachGeneratorModal';
 import { ProcessingOverlay, ProcessingState, ProcessingLogItem, ProcessingStep, StepState } from '@/components/processing/ProcessingOverlay';
+import { useRunFinished, useRunTracker } from '@/components/runs/RunTracker';
 import { StageStatusBar, FlowStageKey } from '@/components/processing/StageStatusBar';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { PageHeader } from '@/components/ui/PageHeader';
@@ -80,6 +81,9 @@ function SourcingDashboard() {
     tone: 'info',
   });
   const abortRef = useRef<AbortController | null>(null);
+  const tracker = useRunTracker();
+  /** The run this page is showing a blocking overlay for, if any. */
+  const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedPlatform, setSelectedPlatform] = useState('All');
@@ -107,6 +111,12 @@ function SourcingDashboard() {
   const stopWaiting = () => {
     abortRef.current?.abort();
     setProcessing(null);
+    // Hand the run to the bottom-right popup; it keeps running server-side.
+    if (watchedRunId) {
+      setWatchedRunId(null);
+      setLastStatus({ message: 'Still searching in the background — follow it in the progress popup, bottom right.', tone: 'info' });
+      return;
+    }
     setLastStatus({ message: 'Stopped waiting. Anything already sent to the server still completes and is saved to the session.', tone: 'info' });
   };
 
@@ -343,76 +353,105 @@ function SourcingDashboard() {
       return;
     }
 
-    setIsLoading(true);
     const total = queriesToRun.length;
-    const initialItems: ProcessingLogItem[] = queriesToRun.map((q) => ({
-      id: q.id,
-      platform: q.platform,
-      label: getTemplate(q.query_type)?.label ?? 'Custom query',
-      state: 'active',
-      meta: 'queued',
-    }));
-    const signal = beginProcessing({
+    beginProcessing({
       stage: 'search',
       title: `Running ${total} X-Ray ${total === 1 ? 'query' : 'queries'} individually`,
-      status: 'Connecting to the search engine…',
+      status: 'Starting the run on the server…',
       progress: 0,
       detail: `Depth: up to ${depth} ${depth === 1 ? 'page' : 'pages'} per query`,
-      items: initialItems,
+      cancelLabel: 'Run in the background',
+      cancelNote: 'The search keeps running on the server. Close this and follow it in the progress popup, bottom right.',
+      items: queriesToRun.map((q) => ({
+        id: q.id,
+        platform: q.platform,
+        label: getTemplate(q.query_type)?.label ?? 'Custom query',
+        state: 'active',
+        meta: 'queued',
+      })),
     });
 
     try {
-      const data = await api.runSearch(
-        { jobId: sessionId, constraints, queries: queriesToRun, apiKeys: api.readStoredApiKeys(), serpOptions: { maxPagesPerQuery: depth } },
-        (event) => {
-          if (event.type === 'query_start') {
-            patchProcessing((prev) => ({
-              status: `Searching ${platformLabel(event.platform)} · ${getTemplate(event.queryType)?.label ?? 'Custom query'}…`,
-              items: prev.items?.map((it) => (it.id === event.queryId ? { ...it, meta: 'searching…' } : it)),
-            }));
-          } else if (event.type === 'query_done') {
-            const r = event.result as QueryRunResult;
-            patchProcessing((prev) => ({
-              progress: (event.done / event.total) * 0.9,
-              status: `${event.done} of ${event.total} queries done · ${event.indexedSoFar} profiles indexed so far`,
-              detail: `${platformLabel(r.platform)} · ${getTemplate(r.queryType)?.label ?? 'Custom'}: ${r.indexedCount} indexed from ${r.resultCount} results${r.pagesFetched ? ` · ${r.pagesFetched} ${r.pagesFetched === 1 ? 'page' : 'pages'}` : ''}`,
-              items: prev.items?.map((it) =>
-                it.id === r.queryId
-                  ? {
-                      ...it,
-                      state: r.status === 'completed' ? 'done' : r.status === 'skipped' ? 'skipped' : 'failed',
-                      meta: r.status === 'completed' ? `${r.indexedCount}/${r.resultCount}${r.creditsUsed ? ` · ${r.creditsUsed}cr` : ''}` : r.error?.slice(0, 40) || r.status,
-                    }
-                  : it
-              ),
-            }));
-          } else if (event.type === 'stage') {
-            patchProcessing({ status: event.label, progress: 0.95 });
-          }
-        },
-        signal
-      );
-
-      setCandidates(data.candidates);
-      setSearchStats({ ...EMPTY_STATS, ...data.stats });
-      setQueryResults(data.queryResults ?? []);
-      setSelectedPlatform('All');
-      setSelectedMatchTier('All');
-      setStep('search');
-      setSessionUpdatedAt(new Date().toISOString());
-      notifySessionsChanged();
-      endProcessing(
-        `Run complete · ${data.stats.queriesRun}/${data.stats.queriesRun + data.stats.queriesFailed} queries · ${data.stats.total} indexed · ${data.candidates.length} profiles stored${data.stats.creditsUsed ? ` · ${data.stats.creditsUsed} credits` : ''}`,
-        data.stats.queriesFailed > 0 && data.stats.queriesRun === 0 ? 'error' : 'success'
-      );
+      // The run is handed to the server and tracked by id. This request returns
+      // in milliseconds — the search itself carries on in the background, so
+      // closing the overlay or leaving the page costs nothing.
+      const runId = await tracker.start({
+        jobId: sessionId,
+        constraints,
+        queries: queriesToRun,
+        apiKeys: api.readStoredApiKeys(),
+        serpOptions: { maxPagesPerQuery: depth },
+      });
+      setWatchedRunId(runId);
     } catch (e: any) {
-      if (signal.aborted) return;
-      endProcessing(e?.message || 'The search run failed.', 'error');
-      setError(e?.message || 'The search run failed.');
-    } finally {
-      setIsLoading(false);
+      setProcessing(null);
+      endProcessing(e?.message || 'The search run could not be started.', 'error');
+      setError(e?.message || 'The search run could not be started.');
     }
   };
+
+  // While this page is watching a run, the overlay mirrors the tracker's live
+  // snapshot. The tracker keeps polling either way, so this is presentation
+  // only — nothing here drives the search.
+  useEffect(() => {
+    if (!watchedRunId) return;
+    tracker.watch(watchedRunId);
+    return () => tracker.watch(null);
+  }, [watchedRunId, tracker]);
+
+  useEffect(() => {
+    if (!watchedRunId) return;
+    const run = tracker.runs.find((r) => r.runId === watchedRunId);
+    if (!run) return;
+    patchProcessing((prev) => ({
+      status: run.statusText ?? prev.status,
+      progress: run.progress,
+      items: prev.items?.map((it) => {
+        const q = run.queries.find((x) => x.queryId === it.id);
+        if (!q) return it;
+        return {
+          ...it,
+          state: q.outcome === 'fetched' ? 'done' : q.outcome === 'skipped' ? 'skipped' : q.outcome === 'failed' ? 'failed' : 'active',
+          meta:
+            q.outcome === 'fetched'
+              ? `${q.keptCount}/${q.resultCount}${q.creditCost ? ` · ${q.creditCost}cr` : ''}`
+              : q.outcome === 'running'
+                ? 'searching…'
+                : q.outcome === 'pending'
+                  ? 'queued'
+                  : q.error?.slice(0, 40) || q.outcome,
+        };
+      }),
+    }));
+  }, [watchedRunId, tracker.runs]);
+
+  // A finished run refreshes this session's stored results, whether or not the
+  // recruiter stayed to watch it.
+  useRunFinished((detail) => {
+    if (detail.jobId !== sessionId) return;
+    if (detail.runId === watchedRunId) setWatchedRunId(null);
+    void (async () => {
+      try {
+        const fresh = await api.getSession(detail.jobId);
+        setCandidates(fresh.candidates);
+        setSearchStats(fresh.last_run?.stats ?? { ...EMPTY_STATS, deduplicated: fresh.candidates.length });
+        setQueryResults(fresh.last_run?.query_results ?? []);
+        setSelectedPlatform('All');
+        setSelectedMatchTier('All');
+        setStep('search');
+        setSessionUpdatedAt(fresh.job.updated_at);
+        const stats = fresh.last_run?.stats;
+        endProcessing(
+          detail.status === 'aborted'
+            ? `Run stopped · ${fresh.candidates.length} profiles stored`
+            : `Run ${detail.status === 'partial' ? 'partly complete' : 'complete'} · ${stats?.queriesRun ?? 0} queries · ${stats?.total ?? 0} indexed · ${fresh.candidates.length} profiles stored${stats?.creditsUsed ? ` · ${stats.creditsUsed} credits` : ''}`,
+          detail.status === 'failed' ? 'error' : detail.status === 'partial' ? 'info' : 'success'
+        );
+      } catch {
+        endProcessing('The run finished, but its results could not be loaded. Reopen the session.', 'error');
+      }
+    })();
+  });
 
   // --- candidate edits ---------------------------------------------------------
 

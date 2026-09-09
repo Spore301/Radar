@@ -356,6 +356,12 @@ model SearchRun {
   reservationExpiresAt DateTime?
   heartbeatAt          DateTime?
 
+  // Live progress for the background run. The row is created before the work
+  // starts and updated as each query lands, so the progress popup can be
+  // restored by any tab at any time — including after a reload.
+  stage      String?
+  statusText String?
+
   startedById  String?
   startedBy    User?     @relation(fields: [startedById], references: [id], onDelete: SetNull)
   startedAt    DateTime  @default(now())
