@@ -12,6 +12,7 @@ import {
   markQueryStart,
 } from '../db/searchRuns';
 import { updateSession } from '../db/sessions';
+import { prisma } from '../db/client';
 import type { SerpOptions } from './serpConfig';
 import type { MergedConstraints, XRayQuery } from '../types';
 
@@ -47,6 +48,9 @@ export interface StartRunInput {
  * The caller must not await the search itself.
  */
 export async function startSearchRun(input: StartRunInput): Promise<string> {
+  // What the session looked like before, so a failed start can be undone.
+  const before = await prisma.job.findUnique({ where: { id: input.jobId }, select: { status: true } });
+
   // Persist what is about to run first, so the receipt and the bundle agree
   // even if the process dies one line later.
   await updateSession(input.jobId, {
@@ -55,12 +59,21 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
     status: 'searching',
   });
 
-  const runId = await createRunRow({
-    jobId: input.jobId,
-    userId: input.userId,
-    queries: input.queries,
-    resultsCap: input.constraints.results_cap ?? 50,
-  });
+  let runId: string;
+  try {
+    runId = await createRunRow({
+      jobId: input.jobId,
+      userId: input.userId,
+      queries: input.queries,
+      resultsCap: input.constraints.results_cap ?? 50,
+    });
+  } catch (err) {
+    // Starting must be all-or-nothing. Without this the session is left
+    // 'searching' forever with no run row behind it — nothing to poll, no
+    // progress popup, and a UI stuck mid-flight until someone edits the row.
+    await updateSession(input.jobId, { status: before?.status ?? 'draft' }).catch(() => {});
+    throw err;
+  }
 
   inFlight.add(runId);
   // Deliberately not awaited: this is the whole point of the async run.

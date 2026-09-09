@@ -42,16 +42,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No SerpAPI key on file. Add one in Settings before running a search.' }, { status: 400 });
   }
 
-  const runId = await startSearchRun({
-    jobId,
-    userId: session!.user.id,
-    constraints,
-    queries,
-    keys: { serpapi, deepseek: apiKeys?.deepseek ?? null },
-    serpOptions,
-  });
-
-  return NextResponse.json({ runId, queriesTotal: queries.length }, { status: 202 });
+  try {
+    const runId = await startSearchRun({
+      jobId,
+      userId: session!.user.id,
+      constraints,
+      queries,
+      keys: { serpapi, deepseek: apiKeys?.deepseek ?? null },
+      serpOptions,
+    });
+    return NextResponse.json({ runId, queriesTotal: queries.length }, { status: 202 });
+  } catch (err: any) {
+    // An unhandled throw here reaches the client as a bare "Request failed
+    // (500)", which says nothing. Report what actually broke instead.
+    console.error('Could not start a search run:', err);
+    return NextResponse.json({ error: `The search could not be started: ${err?.message || 'unknown error'}` }, { status: 500 });
+  }
 }
 
 /**
@@ -62,6 +68,11 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
-  const runs = await listRunSnapshots(session!.user.id);
-  return NextResponse.json({ runs });
+  try {
+    const runs = await listRunSnapshots(session!.user.id);
+    return NextResponse.json({ runs });
+  } catch (err: any) {
+    console.error('Could not list search runs:', err);
+    return NextResponse.json({ error: `Run progress is unavailable: ${err?.message || 'unknown error'}` }, { status: 500 });
+  }
 }
