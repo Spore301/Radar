@@ -14,7 +14,9 @@ prisma/*.db-journal
 prisma/*.db-wal
 prisma/*.db-shm
 uploads
-scripts/.e2e-shots
+# The e2e harness drives a real browser via Playwright, which the image does
+# not ship. It is not part of the app and must not enter the build context.
+scripts
 *.tsbuildinfo
 npm-debug.log*
 .DS_Store

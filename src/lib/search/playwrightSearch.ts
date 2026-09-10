@@ -1,8 +1,35 @@
-import type { Browser } from 'playwright';
 import type { RawSearchResult, SerpProvider } from './serp';
 
-let browserInstance: Browser | null = null;
-let browserLaunchPromise: Promise<Browser> | null = null;
+// ---------------------------------------------------------------------------
+// Minimal structural view of the Playwright API this file touches.
+//
+// Typed locally, not via `import type { Browser } from 'playwright'`, so the
+// type-checker never needs the package on disk. `playwright` is an *optional*
+// dependency and is deliberately absent from the production image (the
+// Dockerfile installs with `--omit=optional`); with the real import the
+// production build failed at `next build`'s type-check step with "Cannot find
+// module 'playwright'". Keep these interfaces to exactly the members used
+// below so they stay trivially compatible with the real types.
+// ---------------------------------------------------------------------------
+interface HeadlessPage {
+  goto(url: string, options?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit'; timeout?: number }): Promise<unknown>;
+  evaluate<R>(pageFunction: () => R): Promise<R>;
+}
+interface HeadlessContext {
+  newPage(): Promise<HeadlessPage>;
+  close(): Promise<void>;
+}
+interface HeadlessBrowser {
+  isConnected(): boolean;
+  newContext(options?: { userAgent?: string; viewport?: { width: number; height: number } | null }): Promise<HeadlessContext>;
+  close(): Promise<void>;
+}
+interface PlaywrightModule {
+  chromium: { launch(options?: { headless?: boolean; args?: string[] }): Promise<HeadlessBrowser> };
+}
+
+let browserInstance: HeadlessBrowser | null = null;
+let browserLaunchPromise: Promise<HeadlessBrowser> | null = null;
 let idleCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 const BROWSER_IDLE_MS = 5 * 60 * 1000;
@@ -44,7 +71,7 @@ export async function closeBrowser(): Promise<void> {
 // an optional dependency. A host with no browser binaries installed degrades to a
 // thrown error from this one call site — caught by the caller — rather than
 // crashing the whole route (or the production build) at import time.
-async function getBrowserInstance(): Promise<Browser> {
+async function getBrowserInstance(): Promise<HeadlessBrowser> {
   if (browserInstance && browserInstance.isConnected()) {
     scheduleIdleClose();
     return browserInstance;
@@ -52,7 +79,11 @@ async function getBrowserInstance(): Promise<Browser> {
 
   if (!browserLaunchPromise) {
     browserLaunchPromise = (async () => {
-      const { chromium } = await import('playwright');
+      // `as string` widens the specifier away from a literal type, so TypeScript
+      // types this as Promise<any> instead of resolving the module (which is not
+      // installed in production). SWC erases the assertion, so webpack still sees
+      // the literal `import('playwright')` that next.config.js marks external.
+      const { chromium } = (await import('playwright' as string)) as PlaywrightModule;
       const browser = await chromium.launch({
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -83,7 +114,7 @@ export async function executePlaywrightXRaySearch(
 ): Promise<{ results: RawSearchResult[]; provider: SerpProvider }> {
   const results: RawSearchResult[] = [];
   let provider: SerpProvider = 'none';
-  let context: Awaited<ReturnType<Browser['newContext']>> | null = null;
+  let context: HeadlessContext | null = null;
 
   try {
     const browser = await getBrowserInstance();
