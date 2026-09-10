@@ -247,6 +247,82 @@ For automatic nightly backups, on the server run `crontab -e` and add:
 
 ---
 
+## Part 11. Cap your spending and stop the instance automatically
+
+AWS has no true hard spending limit, but it can watch your spend and stop the instance when a threshold is crossed. That is close enough, with one caveat: billing data refreshes roughly every eight hours, so the stop happens within that window rather than instantly. Budget your cap a little below what you can afford.
+
+### What the instance costs
+
+Based on `t2.small` in Singapore at $0.0292 per hour:
+
+| Item | Per month |
+|---|---|
+| Instance compute, running continuously | $21.30 |
+| Public IPv4 address | $3.65 |
+| 20 GiB gp3 disk | about $2.40 |
+| Total | about $27 |
+
+A $50 cap is therefore about eight weeks of continuous running.
+
+### Create the budget
+
+You need the instance to exist first, because the action targets it by ID.
+
+1. In the top search bar type **Billing** and open **Billing and Cost Management**.
+2. In the left menu click **Budgets**, then **Create budget**.
+3. Choose **Customize (advanced)**, then **Cost budget**, then **Next**.
+4. Under **Set budget amount**:
+   - Period: **Annually**
+   - Budget renewal type: **Expiring budget**
+   - Start date: today. End date: twelve months from now.
+   - Enter budgeted amount: `50`
+
+   An expiring annual budget is one single pot of $50 rather than $50 every month, which is what a total cap means.
+5. Budget scope: leave it on **All AWS services**. This is deliberate. It catches the disk, the IP address and data transfer as well as the instance, so nothing slips past the cap.
+6. Expand **Advanced options** and make sure **Credits** is **not** included in the calculation. This matters. If credits are included, the budget measures what you owe after credits are applied, which stays near zero and never triggers. Excluding them makes the budget measure the credit you are actually burning.
+7. Click **Next**.
+
+### Add warning emails
+
+On the alerts page, click **Add alert threshold** twice and set up two:
+
+| Threshold | Purpose |
+|---|---|
+| 50% of budgeted amount | Early warning, about four weeks in |
+| 80% of budgeted amount | Time to decide, about six weeks in |
+
+Put your email address in the recipients box for both. Click **Next**.
+
+### Attach the stop action
+
+This is the part that actually shuts things down.
+
+1. Click **Add action**.
+2. Threshold: **100% of budgeted amount**.
+3. IAM role: AWS needs permission to stop your instance on your behalf. If no role is offered, create one and attach the managed policy named `AWSBudgetsActionsWithAWSResourceControlAccess`. The console usually offers to create it for you.
+4. Action type: **EC2 instances**.
+5. Select your `Radr` instance from the list.
+6. Approval: choose **Automatically execute action**. If you pick the approval option instead, AWS only emails you and waits, which defeats the purpose.
+7. Click **Next**, review the summary, then **Create budget**.
+
+Console wording shifts between AWS releases. If a label differs, the intent above is what to match.
+
+### What stopping does and does not stop
+
+A stopped instance costs nothing for compute, which is the large part of the bill. Two smaller charges continue:
+
+- The 20 GiB disk, about $2.40 a month, because your database lives on it.
+- The Elastic IP address, about $3.65 a month.
+
+So a stopped instance still costs roughly $6 a month. That is deliberate: your data and your address survive, and starting it again is one click. To reduce the bill to exactly zero you must **terminate** the instance and **release** the Elastic IP, which destroys the server and the database with it. Take a backup first, per Part 10.
+
+### Two ways to stretch the credit further
+
+- **Stop it outside working hours.** This is an internal tool. If it only needs to be up during the day, stopping it nightly and at weekends cuts compute by roughly two thirds, turning eight weeks into six months. Start and stop from the EC2 console, or schedule it later with EC2 Instance Scheduler.
+- **Shrink the instance after the first build.** Building the image needs about 2 GB of memory, but serving the app needs a few hundred megabytes. Once the image is built you can resize to `t3.micro`, which is free for the first twelve months on a new account. Rebuilds then need a temporary resize back up. Stop the instance, use **Actions**, **Instance settings**, **Change instance type**, then start it again.
+
+---
+
 ## Everyday commands (run on the server, in ~/radar)
 
 | What | Command |
