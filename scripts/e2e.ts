@@ -248,7 +248,52 @@ async function shot(page: Page, name: string) {
     const withNotes = await prisma.candidate.findFirst({ where: { jobId: createdSessionId!, name: 'Priya Nair' } });
     check('drawer notes persist to the database', withNotes?.notes === 'Strong design-systems portfolio', withNotes?.notes ?? undefined);
     await shot(page, '08-drawer');
-    await page.keyboard.press('Escape');
+
+    // --- regression: draft outreach from the drawer, leave the modal, drawer must still close ---
+    await drawer.getByRole('button', { name: /Draft outreach|Draft follow-up/ }).click();
+    const outreachModal = page.locator('[aria-labelledby="outreach-title"]');
+    await outreachModal.waitFor({ timeout: 10000 });
+    await outreachModal.locator('header button[aria-label="Close"]').click();
+    await outreachModal.waitFor({ state: 'detached', timeout: 5000 });
+    const drawersAfterModal = await page.locator('[aria-labelledby="drawer-title"]').count();
+    check('leaving the outreach modal leaves exactly one drawer (no duplicate from key collision)', drawersAfterModal === 1, `${drawersAfterModal} drawer(s)`);
+    await page.locator('[aria-labelledby="drawer-title"] header button[aria-label="Close"]').click();
+    await page.waitForTimeout(300);
+    check('drawer X closes it after the modal cycle', (await page.locator('[aria-labelledby="drawer-title"]').count()) === 0);
+
+    // --- regression: the Low tier bar must be visibly coloured, not the track colour ---
+    const tierColours = await page.evaluate(() => {
+      // The Low tier's class lives in src/lib/utils/tier.ts; if Tailwind does not
+      // scan that folder the class is purged and the bar paints nothing.
+      const probe = document.createElement('div');
+      probe.className = 'track';
+      const fill = document.createElement('div');
+      fill.className = 'h-full rounded-full bg-faint';
+      probe.appendChild(fill);
+      document.body.appendChild(probe);
+      const out = { fill: getComputedStyle(fill).backgroundColor, track: getComputedStyle(probe).backgroundColor };
+      probe.remove();
+      const real = document.querySelector('[data-tier="low"]') as HTMLElement | null;
+      return { ...out, realLow: real ? getComputedStyle(real).backgroundColor : null };
+    });
+    check(
+      'low-tier score bar has its own colour (bg-faint not purged)',
+      tierColours.fill !== tierColours.track && !/rgba\(0, 0, 0, 0\)|transparent/.test(tierColours.fill) && (tierColours.realLow === null || tierColours.realLow === tierColours.fill),
+      `fill=${tierColours.fill} track=${tierColours.track}${tierColours.realLow ? ` real=${tierColours.realLow}` : ''}`
+    );
+
+    // --- regression: long names truncate inside the card instead of overflowing ---
+    const nameBtn = page.locator('.card', { hasText: 'Priya Nair' }).first().getByRole('button', { name: 'Priya Nair' });
+    const truncation = await nameBtn.evaluate((el) => {
+      const b = el as HTMLElement;
+      b.textContent = 'Aishwarya Venkataraghavan Subramaniam Iyer Narayanaswamy Krishnamurthy';
+      const cs = getComputedStyle(b);
+      const parentW = (b.parentElement as HTMLElement).clientWidth;
+      return { overflow: cs.overflow, ellipsis: cs.textOverflow, nowrap: cs.whiteSpace, clipped: b.scrollWidth > b.clientWidth, fitsParent: b.clientWidth <= parentW + 1 };
+    });
+    check('card name truncates with an ellipsis within its column', truncation.ellipsis === 'ellipsis' && truncation.nowrap === 'nowrap' && truncation.clipped && truncation.fitsParent, JSON.stringify(truncation));
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.getByText('Priya Nair').first().waitFor({ timeout: 15000 });
 
     // --- filters: platform pill -------------------------------------------------
     await page.getByRole('button', { name: /^Behance/ }).click();
@@ -270,7 +315,59 @@ async function shot(page: Page, name: string) {
     await page.goto(`${BASE}/dashboard/pipeline`, { waitUntil: 'networkidle' });
     await page.getByText('Outreach pipeline').waitFor();
     check('pipeline board lists shortlisted candidate', await page.locator('article', { hasText: 'Priya Nair' }).first().isVisible());
+    const columnOrder = await page.locator('[data-kanban] section[data-stage]').evaluateAll((els) => els.map((e) => e.getAttribute('data-stage')));
+    check('board columns follow the funnel order', columnOrder.join('>') === 'New>Reviewed>Saved>Shortlisted>Contacted>Replied>Archived', columnOrder.join(' > '));
+    check('shortlisted card offers Message as its forward action', await page.locator('section[data-stage="Shortlisted"] article', { hasText: 'Priya Nair' }).getByRole('button', { name: /^Message/ }).isVisible());
     await shot(page, '10-pipeline-board');
+
+    // --- connection request note: 300-char cap, logged, candidate → Contacted with a follow-up ---
+    await page.locator('section[data-stage="Shortlisted"] article', { hasText: 'Priya Nair' }).getByRole('button', { name: /^Message/ }).click();
+    const noteModal = page.locator('[aria-labelledby="outreach-title"]');
+    await noteModal.waitFor({ timeout: 10000 });
+    const channelSelect = noteModal.getByLabel('Channel');
+    check('LinkedIn profile defaults to a connection note', (await channelSelect.inputValue()) === 'LinkedIn Note', await channelSelect.inputValue());
+    check('channel list offers the connection note with its cap', (await channelSelect.locator('option', { hasText: /connection note · 300 chars/ }).count()) === 1);
+    await noteModal.getByText('Drafting…').waitFor({ state: 'detached', timeout: 90000 }).catch(() => {});
+    const noteText = await noteModal.locator('textarea').inputValue();
+    const counted = Number(await noteModal.locator('[data-char-count]').getAttribute('data-char-count'));
+    check('drafted note is within 300 characters', noteText.length > 0 && noteText.length <= 300 && counted === noteText.length, `${noteText.length} chars`);
+    check('note has no subject field', (await noteModal.getByText('Subject', { exact: true }).count()) === 0);
+    const sourceChip = await noteModal.getByText(/AI draft|Template/).first().textContent();
+    check('draft declares its source honestly', /AI draft|Template/.test(sourceChip ?? ''), sourceChip ?? undefined);
+    await shot(page, '10b-connection-note');
+    const logged = page.waitForResponse((r) => r.url().includes('/outreach') && r.request().method() === 'POST');
+    await noteModal.getByRole('button', { name: 'Log as sent' }).click();
+    const logResp = await logged;
+    check('connection note logs with 201', logResp.status() === 201, `status ${logResp.status()}`);
+    await noteModal.waitFor({ state: 'detached', timeout: 5000 });
+    const afterNote = await prisma.candidate.findFirst({ where: { jobId: createdSessionId!, name: 'Priya Nair' }, include: { outreachLogs: true } });
+    check('candidate moved to Contacted with the channel stamped', afterNote?.status === 'Contacted' && afterNote?.outreachChannel === 'LinkedInNote', `${afterNote?.status} / ${afterNote?.outreachChannel}`);
+    check('stage change is timestamped', Boolean(afterNote?.stageChangedAt));
+    const fuDays = afterNote?.nextFollowUp ? Math.round((afterNote.nextFollowUp.getTime() - Date.now()) / 86400000) : -1;
+    check('a follow-up was suggested ~5 days out for a connection note', fuDays >= 4 && fuDays <= 5, `${fuDays} days`);
+    check('outreach log row stored with the note', afterNote?.outreachLogs.length === 1 && afterNote.outreachLogs[0].channel === 'LinkedInNote' && afterNote.outreachLogs[0].messageBody.length <= 300);
+    check('private notes were not polluted with the message', afterNote?.notes === 'Strong design-systems portfolio', afterNote?.notes ?? undefined);
+    await page.locator('section[data-stage="Contacted"] article', { hasText: 'Priya Nair' }).waitFor({ timeout: 10000 });
+    check('card moved to the Contacted column with tracking chips', (await page.locator('section[data-stage="Contacted"] article', { hasText: 'Priya Nair' }).locator('[data-tracking-chips]').count()) === 1);
+    await shot(page, '10c-board-after-note');
+
+    // --- the activity timeline shows it; a follow-up never regresses the stage ---
+    await page.locator('section[data-stage="Contacted"] article', { hasText: 'Priya Nair' }).getByRole('button', { name: 'Priya Nair' }).click();
+    const cDrawer = page.locator('[aria-labelledby="drawer-title"]');
+    await cDrawer.waitFor();
+    await cDrawer.locator('[data-activity] li').first().waitFor({ timeout: 10000 });
+    check('drawer activity lists the connection note', (await cDrawer.locator('[data-activity]').getByText('Connection note').count()) === 1);
+    check('drawer stage select is in funnel order', (await cDrawer.getByLabel('Stage').locator('option').evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value).join('>'))) === 'New>Reviewed>Saved>Shortlisted>Contacted>Replied>Archived');
+    await cDrawer.locator('header button[aria-label="Close"]').click();
+    const repliedResp = await page.request.patch(`${BASE}/api/candidates/${afterNote!.id}`, { data: { status: 'Replied' } });
+    check('stage can be advanced to Replied via the API', repliedResp.ok());
+    const followUpResp = await page.request.post(`${BASE}/api/candidates/${afterNote!.id}/outreach`, { data: { channel: 'LinkedIn DM', message: 'Thanks for connecting — would Thursday work for a quick call?' } });
+    const followedUp = await prisma.candidate.findUnique({ where: { id: afterNote!.id } });
+    check('logging a follow-up does not regress Replied back to Contacted', followUpResp.status() === 201 && followedUp?.status === 'Replied', `${followUpResp.status()} · ${followedUp?.status}`);
+    const tooLong = await page.request.post(`${BASE}/api/candidates/${afterNote!.id}/outreach`, { data: { channel: 'LinkedIn Note', message: 'x'.repeat(301) } });
+    check('a 301-character connection note is refused server-side', tooLong.status() === 400, `status ${tooLong.status()}`);
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.getByText('Outreach pipeline').waitFor();
     await page.getByRole('button', { name: 'Table', exact: true }).click();
     await page.getByRole('button', { name: 'Export CSV' }).waitFor();
     check('pipeline table view renders with export', true);
@@ -341,9 +438,10 @@ async function shot(page: Page, name: string) {
     const apiSessions = await context.request.get(`${BASE}/api/sessions`);
     const body = await apiSessions.json();
     check('/api/sessions returns the stored session', apiSessions.ok() && body.sessions.some((s: any) => s.id === createdSessionId));
-    const apiCands = await context.request.get(`${BASE}/api/candidates?jobId=${createdSessionId}&status=Shortlisted`);
+    // Priya was moved Shortlisted → Contacted (note logged) → Replied earlier in the run.
+    const apiCands = await context.request.get(`${BASE}/api/candidates?jobId=${createdSessionId}&status=Replied`);
     const cbody = await apiCands.json();
-    check('/api/candidates filters by session + status', apiCands.ok() && cbody.candidates.length === 1 && cbody.candidates[0].name === 'Priya Nair');
+    check('/api/candidates filters by session + status', apiCands.ok() && cbody.candidates.length === 1 && cbody.candidates[0].name === 'Priya Nair', `${cbody.candidates?.length} Replied`);
 
     // --- console errors -----------------------------------------------------------------
     // The deliberate 400 from running without a SerpAPI key is logged by the browser as a failed resource load.

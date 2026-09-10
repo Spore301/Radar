@@ -1,11 +1,14 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { CandidateProfile, OutreachChannel, CandidateStatus } from '@/lib/types';
-import { X, ExternalLink, MapPin } from 'lucide-react';
+import { CandidateProfile, OutreachChannel, CandidateStatus, OutreachLog } from '@/lib/types';
+import { X, ExternalLink, MapPin, ChevronDown, Send } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { Avatar } from '@/components/ui/Avatar';
 import { scoreTier, TIER_LABEL, TIER_TEXT } from '@/lib/utils/tier';
+import { CHANNELS, STAGES, channelDef, isAtLeast, relativeAgo } from '@/lib/pipeline/stages';
+import { TrackingChips } from './TrackingChips';
+import * as api from '@/lib/api/sessions';
 
 interface CandidateDetailDrawerProps {
   candidate: CandidateProfile;
@@ -23,16 +26,23 @@ const BREAKDOWN: Array<{ key: keyof CandidateProfile['match_breakdown']; label: 
   { key: 'domain_score', label: 'Domain', max: 10 },
 ];
 
-// Mounted only with a candidate; callers pass `key={candidate.id}` so switching
-// candidates remounts fresh state.
+/** First touch on LinkedIn is a connection note; elsewhere, email. */
+function preferredChannelFor(c: CandidateProfile): OutreachChannel {
+  return c.platform === 'LinkedIn' ? 'LinkedIn Note' : 'Email';
+}
+
+// Mounted only with a candidate; callers pass a key so switching candidates
+// remounts fresh state.
 export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, onOpenAIGenerator }: CandidateDetailDrawerProps) {
   const [status, setStatus] = useState<CandidateStatus>(candidate.status);
-  const [channel, setChannel] = useState<OutreachChannel>(candidate.outreach_channel || 'LinkedIn DM');
+  const [channel, setChannel] = useState<OutreachChannel>(candidate.outreach_channel || preferredChannelFor(candidate));
   const [notes, setNotes] = useState(candidate.notes || '');
   const [nextFollowUp, setNextFollowUp] = useState(candidate.next_follow_up ? candidate.next_follow_up.slice(0, 10) : '');
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState<string[]>(candidate.tags || []);
   const [saving, setSaving] = useState(false);
+  const [logs, setLogs] = useState<OutreachLog[] | null>(null);
+  const [openLog, setOpenLog] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -40,9 +50,28 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // The activity timeline. Refetched when a new outreach lands on this candidate.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listOutreach(candidate.id)
+      .then((l) => !cancelled && setLogs(l))
+      .catch(() => !cancelled && setLogs([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [candidate.id, candidate.outreach_date]);
+
+  // Keep the stage select in step when the row changes underneath (e.g. outreach logged from the modal).
+  useEffect(() => {
+    setStatus(candidate.status);
+    if (candidate.outreach_channel) setChannel(candidate.outreach_channel);
+    setNextFollowUp(candidate.next_follow_up ? candidate.next_follow_up.slice(0, 10) : '');
+  }, [candidate.status, candidate.outreach_channel, candidate.next_follow_up]);
+
   const dirty =
     status !== candidate.status ||
-    channel !== (candidate.outreach_channel || 'LinkedIn DM') ||
+    channel !== (candidate.outreach_channel || preferredChannelFor(candidate)) ||
     notes !== (candidate.notes || '') ||
     nextFollowUp !== (candidate.next_follow_up ? candidate.next_follow_up.slice(0, 10) : '') ||
     JSON.stringify(tags) !== JSON.stringify(candidate.tags || []);
@@ -63,6 +92,7 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
   };
 
   const tier = scoreTier(candidate.match_score);
+  const contacted = isAtLeast(candidate.status, 'Contacted');
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-ink/40 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
@@ -71,7 +101,7 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
         <header className="px-5 py-4 border-b border-hairline flex items-start gap-3">
           <Avatar name={candidate.name} src={candidate.avatar_url} size={40} />
           <div className="min-w-0 flex-1">
-            <h2 id="drawer-title" className="text-heading-sm text-ink truncate">
+            <h2 id="drawer-title" className="text-heading-sm text-ink truncate" title={candidate.name}>
               {candidate.name}
             </h2>
             <p className="text-body-sm text-body line-clamp-2">{candidate.headline}</p>
@@ -93,9 +123,79 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
               View profile <ExternalLink className="w-3.5 h-3.5" />
             </a>
             <button type="button" onClick={() => onOpenAIGenerator(candidate)} className="btn-primary flex-1">
-              Draft outreach
+              {contacted ? 'Draft follow-up' : 'Draft outreach'}
             </button>
           </div>
+
+          {/* Tracking at a glance */}
+          <section className="px-5 py-4 border-b border-hairline flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <span className="eyebrow">Pipeline</span>
+              <TrackingChips candidate={candidate} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1.5">
+                <span className="field-label">Stage</span>
+                <select value={status} onChange={(e) => setStatus(e.target.value as CandidateStatus)} className="select" aria-label="Stage">
+                  {STAGES.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="field-label">Preferred channel</span>
+                <select value={channel} onChange={(e) => setChannel(e.target.value as OutreachChannel)} className="select" aria-label="Preferred channel">
+                  {CHANNELS.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1.5 col-span-2">
+                <span className="field-label">Next follow-up</span>
+                <input type="date" value={nextFollowUp} onChange={(e) => setNextFollowUp(e.target.value)} className="input" />
+              </label>
+            </div>
+            <p className="text-body-xs text-mute">{STAGES.find((s) => s.id === status)?.hint}. Contacted is set automatically when you log outreach.</p>
+          </section>
+
+          {/* Activity */}
+          <section className="px-5 py-4 border-b border-hairline flex flex-col gap-2" aria-label="Activity">
+            <div className="flex items-center justify-between">
+              <span className="eyebrow">Activity</span>
+              {logs && logs.length > 0 && <span className="text-body-xs text-mute tabular-nums">{logs.length} logged</span>}
+            </div>
+            {logs === null ? (
+              <p className="text-body-sm text-faint">Loading…</p>
+            ) : logs.length === 0 ? (
+              <p className="text-body-sm text-faint">No outreach logged yet. Drafts you log as sent will appear here with their channel and follow-up date.</p>
+            ) : (
+              <ol className="flex flex-col divide-y divide-hairline-soft" data-activity>
+                {logs.map((l) => {
+                  const open = openLog === l.id;
+                  const def = channelDef(l.channel);
+                  return (
+                    <li key={l.id} className="py-2.5 flex flex-col gap-1.5">
+                      <button type="button" onClick={() => setOpenLog(open ? null : l.id)} className="flex items-center gap-2 text-left w-full" aria-expanded={open}>
+                        <Send className="w-3.5 h-3.5 text-body flex-shrink-0" />
+                        <span className="chip text-ink">{def.short}</span>
+                        <span className="text-body-xs text-mute truncate flex-1">
+                          {new Date(l.sent_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {relativeAgo(l.sent_at)}
+                          {l.sent_by ? ` · ${l.sent_by}` : ''}
+                          {l.follow_up_date ? ` · follow-up ${new Date(l.follow_up_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}` : ''}
+                        </span>
+                        <ChevronDown className={`w-3.5 h-3.5 text-mute flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+                      </button>
+                      <p className={`text-body-sm text-body whitespace-pre-wrap pl-6 ${open ? '' : 'line-clamp-2'}`}>{l.message_body}</p>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
 
           <section className="px-5 py-4 border-b border-hairline flex flex-col gap-3">
             <div className="flex items-baseline justify-between">
@@ -149,34 +249,6 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
           </section>
 
           <section className="px-5 py-4 flex flex-col gap-4">
-            <span className="eyebrow">Pipeline</span>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1.5">
-                <span className="field-label">Stage</span>
-                <select value={status} onChange={(e) => setStatus(e.target.value as CandidateStatus)} className="select">
-                  <option value="New">New</option>
-                  <option value="Reviewed">Reviewed</option>
-                  <option value="Saved">Saved</option>
-                  <option value="Contacted">Contacted</option>
-                  <option value="Replied">Replied</option>
-                  <option value="Shortlisted">Shortlisted</option>
-                  <option value="Archived">Archived</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="field-label">Channel</span>
-                <select value={channel} onChange={(e) => setChannel(e.target.value as OutreachChannel)} className="select">
-                  <option value="LinkedIn DM">LinkedIn DM</option>
-                  <option value="Email">Email</option>
-                  <option value="WhatsApp">WhatsApp</option>
-                  <option value="Call">Call</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-1.5 col-span-2">
-                <span className="field-label">Next follow-up</span>
-                <input type="date" value={nextFollowUp} onChange={(e) => setNextFollowUp(e.target.value)} className="input" />
-              </label>
-            </div>
             <label className="flex flex-col gap-1.5">
               <span className="field-label">Notes</span>
               <textarea rows={4} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Private recruiter notes" className="textarea" />

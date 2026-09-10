@@ -5,6 +5,7 @@ import { MessageTemplate, OutreachChannel } from '@/lib/types';
 import { INITIAL_MESSAGE_TEMPLATES } from '@/lib/seedData';
 import { Plus, Pencil, Check, Copy } from 'lucide-react';
 import { PageHeader } from '@/components/ui/PageHeader';
+import { CHANNELS } from '@/lib/pipeline/stages';
 
 const VARIABLES = ['candidate_name', 'role_title', 'company_name', 'top_skills'] as const;
 
@@ -130,10 +131,11 @@ export default function TemplatesPage() {
                   <label className="flex flex-col gap-1.5">
                     <span className="field-label">Channel</span>
                     <select className="select" value={editing.channel} onChange={(e) => setEditing({ ...editing, channel: e.target.value as OutreachChannel })}>
-                      <option value="LinkedIn DM">LinkedIn DM</option>
-                      <option value="Email">Email</option>
-                      <option value="WhatsApp">WhatsApp</option>
-                      <option value="Call">Call script</option>
+                      {CHANNELS.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.label}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="flex flex-col gap-1.5">

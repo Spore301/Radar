@@ -783,7 +783,11 @@ function SourcingDashboard() {
 
       {selectedCandidate && (
         <CandidateDetailDrawer
-          key={selectedCandidate.id}
+          // Distinct from the outreach modal's key: both are siblings and both
+          // are keyed by candidate, so drafting from the drawer used to give
+          // two children the same key — React then duplicated the drawer when
+          // the modal left, and the twin could never be closed.
+          key={`drawer-${selectedCandidate.id}`}
           candidate={selectedCandidate}
           onClose={() => setSelectedCandidate(null)}
           onUpdateCandidate={handleUpdateCandidate}
@@ -795,7 +799,7 @@ function SourcingDashboard() {
 
       {outreachCandidate && (
         <OutreachGeneratorModal
-          key={outreachCandidate.id}
+          key={`outreach-${outreachCandidate.id}`}
           onClose={() => setOutreachCandidate(null)}
           candidate={outreachCandidate}
           jobTitle={constraints?.job_title || structuredJD?.job_title || 'the role'}

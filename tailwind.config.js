@@ -6,6 +6,10 @@ module.exports = {
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    // Class names also live in plain modules (src/lib/utils/tier.ts holds the
+    // score-tier colours). Without this line those classes are purged and the
+    // low tier's bar renders with no colour at all.
+    './src/lib/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
     extend: {

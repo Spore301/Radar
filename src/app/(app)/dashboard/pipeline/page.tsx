@@ -8,6 +8,7 @@ import { OutreachGeneratorModal } from '@/components/outreach/OutreachGeneratorM
 import { PageHeader } from '@/components/ui/PageHeader';
 import { CandidateProfile, CandidateStatus, OutreachChannel, SessionSummary } from '@/lib/types';
 import * as api from '@/lib/api/sessions';
+import { followUpState } from '@/lib/pipeline/stages';
 import { LayoutGrid, List, RefreshCw, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -91,6 +92,10 @@ export default function PipelinePage() {
   const counts = {
     shortlisted: candidates.filter((c) => c.status === 'Shortlisted').length,
     contacted: candidates.filter((c) => c.status === 'Contacted' || c.status === 'Replied').length,
+    due: candidates.filter((c) => {
+      const s = followUpState(c.next_follow_up);
+      return s.kind === 'overdue' || s.kind === 'today';
+    }).length,
   };
 
   return (
@@ -100,7 +105,7 @@ export default function PipelinePage() {
         title="Outreach pipeline"
         description={
           candidates.length
-            ? `${candidates.length} candidates · ${counts.shortlisted} shortlisted · ${counts.contacted} contacted. Every change is saved to the session that found the person.`
+            ? `${candidates.length} candidates · ${counts.shortlisted} shortlisted · ${counts.contacted} contacted${counts.due ? ` · ${counts.due} follow-up${counts.due === 1 ? '' : 's'} due` : ''}. Every change is saved to the session that found the person.`
             : 'Every candidate from every session, with stage, notes and outreach saved to the database.'
         }
         actions={
@@ -157,7 +162,11 @@ export default function PipelinePage() {
 
       {selectedCandidate && (
         <CandidateDetailDrawer
-          key={selectedCandidate.id}
+          // Distinct from the outreach modal's key: both are siblings and both
+          // are keyed by candidate, so drafting from the drawer used to give
+          // two children the same key — React then duplicated the drawer when
+          // the modal left, and the twin could never be closed.
+          key={`drawer-${selectedCandidate.id}`}
           candidate={selectedCandidate}
           onClose={() => setSelectedCandidate(null)}
           onUpdateCandidate={handleUpdateCandidate}
@@ -167,7 +176,7 @@ export default function PipelinePage() {
 
       {outreachCandidate && (
         <OutreachGeneratorModal
-          key={outreachCandidate.id}
+          key={`outreach-${outreachCandidate.id}`}
           onClose={() => setOutreachCandidate(null)}
           candidate={outreachCandidate}
           jobTitle={outreachCandidate.job_title?.split(' · ')[0] || 'the role'}

@@ -43,6 +43,17 @@ If you are open to exploring new technical challenges, let's connect for a brief
 Would love to give you a quick glimpse of our roadmap. Let me know if you have 10 minutes open this Thursday or Friday.`,
     created_at: new Date().toISOString(),
   },
+  {
+    id: 'tmpl-4',
+    name: 'LinkedIn connection note - First touch',
+    channel: 'LinkedIn Note',
+    role_type: 'General',
+    tone: 'Short & Punchy',
+    // Connection notes are capped at 300 characters by LinkedIn; this renders
+    // to ~210 with typical values, leaving room for a long name or company.
+    body: `Hi {{candidate_name}} — your work with {{top_skills}} caught my eye. I'm hiring a {{role_title}} at {{company_name}} and would value a quick chat. Open to connecting?`,
+    created_at: new Date().toISOString(),
+  },
 ];
 
 // Demo JD used by the "Load Demo Role" shortcut. Deliberately contains no

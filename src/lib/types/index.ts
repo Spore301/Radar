@@ -27,7 +27,12 @@ export type CandidateStatus =
   | 'Shortlisted'
   | 'Archived';
 
-export type OutreachChannel = 'LinkedIn DM' | 'Email' | 'WhatsApp' | 'Call';
+/**
+ * 'LinkedIn Note' is the 300-character note sent with a connection request —
+ * the first touch for most passive candidates, tracked separately from a
+ * message so the board can tell "request sent" from "messaged".
+ */
+export type OutreachChannel = 'LinkedIn Note' | 'LinkedIn DM' | 'Email' | 'WhatsApp' | 'Call';
 
 export interface StructuredJD {
   job_title: string | null;
@@ -143,6 +148,8 @@ export interface CandidateProfile {
   scrape_status: 'success' | 'snippet_only' | 'unverified' | 'blocked' | 'failed';
   status: CandidateStatus;
   discovered_at: string;
+  /** When the stage last changed — drives the "3d in Contacted" chip. */
+  stage_changed_at?: string;
   outreach_channel?: OutreachChannel;
   outreach_date?: string;
   next_follow_up?: string;
@@ -178,6 +185,8 @@ export interface OutreachLog {
   notes?: string;
   follow_up_date?: string;
   tags?: string[];
+  /** Display name of the recruiter who logged it, when known. */
+  sent_by?: string;
 }
 
 export interface MessageTemplate {

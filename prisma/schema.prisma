@@ -89,7 +89,8 @@ enum CandidateStatus {
 // in its domain-type spelling ("LinkedIn DM") is mapped back to that exact
 // string at the database level.
 enum OutreachChannel {
-  LinkedInDM @map("LinkedIn DM")
+  LinkedInNote @map("LinkedIn Note")
+  LinkedInDM   @map("LinkedIn DM")
   Email
   WhatsApp
   Call
@@ -277,6 +278,8 @@ model Candidate {
   livenessCheckedAt        DateTime?
   scrapeStatus             ScrapeStatus
   status                   CandidateStatus   @default(New)
+  // Set whenever status changes; null for rows that predate stage tracking.
+  stageChangedAt           DateTime?
   outreachChannel          OutreachChannel?
   outreachDate             DateTime?
   nextFollowUp             DateTime?

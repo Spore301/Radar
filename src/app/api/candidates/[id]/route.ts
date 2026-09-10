@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/session';
 import { updateCandidate } from '@/lib/db/sessions';
-import type { CandidateStatus, OutreachChannel } from '@/lib/types';
+import { CHANNEL_IDS, STAGE_ORDER } from '@/lib/pipeline/stages';
 
 export const dynamic = 'force-dynamic';
 
-const STATUSES: CandidateStatus[] = ['New', 'Reviewed', 'Saved', 'Contacted', 'Replied', 'Shortlisted', 'Archived'];
-const CHANNELS: OutreachChannel[] = ['LinkedIn DM', 'Email', 'WhatsApp', 'Call'];
+// One definition of the stages and channels (src/lib/pipeline/stages.ts).
+const STATUSES = STAGE_ORDER;
+const CHANNELS = CHANNEL_IDS;
 
 /** PATCH /api/candidates/:id — shortlist / stage / notes / tags / follow-up, persisted to the session. */
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {

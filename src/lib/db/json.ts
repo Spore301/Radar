@@ -186,6 +186,7 @@ export function canonicalizeProfileUrl(url: string): string {
 // ---------------------------------------------------------------------------
 
 const OUTREACH_CHANNEL_FROM_PRISMA: Record<string, OutreachChannel> = {
+  LinkedInNote: 'LinkedIn Note',
   LinkedInDM: 'LinkedIn DM',
   Email: 'Email',
   WhatsApp: 'WhatsApp',
@@ -193,6 +194,7 @@ const OUTREACH_CHANNEL_FROM_PRISMA: Record<string, OutreachChannel> = {
 };
 
 const OUTREACH_CHANNEL_TO_PRISMA: Record<OutreachChannel, string> = {
+  'LinkedIn Note': 'LinkedInNote',
   'LinkedIn DM': 'LinkedInDM',
   Email: 'Email',
   WhatsApp: 'WhatsApp',
@@ -234,6 +236,7 @@ export function toCandidateProfile(row: CandidateRow): CandidateProfile {
     scrape_status: row.scrapeStatus,
     status: row.status,
     discovered_at: row.discoveredAt.toISOString(),
+    stage_changed_at: row.stageChangedAt ? row.stageChangedAt.toISOString() : undefined,
     outreach_channel: row.outreachChannel ? outreachChannelFromPrisma(row.outreachChannel) : undefined,
     outreach_date: row.outreachDate ? row.outreachDate.toISOString() : undefined,
     next_follow_up: row.nextFollowUp ? row.nextFollowUp.toISOString() : undefined,

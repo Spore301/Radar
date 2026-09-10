@@ -3,6 +3,7 @@ import { prisma } from './client';
 import {
   canonicalizeProfileUrl,
   outreachChannelToPrisma,
+  outreachChannelFromPrisma,
   toCandidateProfile,
   toJob,
 } from './json';
@@ -16,9 +17,11 @@ import {
   SessionSummary,
   StructuredJD,
   XRayQuery,
+  OutreachLog,
 } from '../types';
 import type { QueryRunResult, SearchStats, XRaySearchResult } from '../search/x-raySearchService';
 import { canonicalizeQueryString } from '../search/queryValidation';
+import { defaultFollowUpDays, isAtLeast } from '../pipeline/stages';
 
 // ---------------------------------------------------------------------------
 // Session repository.
@@ -368,8 +371,10 @@ export interface CandidatePatch {
 }
 
 export async function updateCandidate(id: string, userId: string | null, patch: CandidatePatch): Promise<CandidateProfile | null> {
-  const exists = await prisma.candidate.findUnique({ where: { id }, select: { id: true } });
+  const exists = await prisma.candidate.findUnique({ where: { id }, select: { id: true, status: true } });
   if (!exists) return null;
+  // Stage age is measured from the last real change, not from every edit.
+  const stageChanged = Boolean(patch.status && patch.status !== exists.status);
 
   const followUp =
     patch.next_follow_up === undefined
@@ -382,6 +387,7 @@ export async function updateCandidate(id: string, userId: string | null, patch: 
     where: { id },
     data: {
       ...(patch.status ? { status: patch.status } : {}),
+      ...(stageChanged ? { stageChangedAt: new Date() } : {}),
       ...(patch.outreach_channel !== undefined
         ? { outreachChannel: patch.outreach_channel ? (outreachChannelToPrisma(patch.outreach_channel) as any) : null }
         : {}),
@@ -395,8 +401,19 @@ export async function updateCandidate(id: string, userId: string | null, patch: 
 }
 
 /**
- * Records a sent message: one OutreachLog row, and the candidate moves to
- * Contacted with the channel and send date stamped on it.
+ * Records a sent message (or a connection-request note) as one OutreachLog row
+ * and stamps the candidate with the channel and date.
+ *
+ * Stage handling is deliberate:
+ *   - a candidate before Contacted moves to Contacted, with stageChangedAt set;
+ *   - a candidate already Contacted / Replied is NOT moved back — a follow-up
+ *     message must never regress someone who has already answered;
+ *   - if no follow-up date is set, one is suggested (5 days for a connection
+ *     note, which takes longer to be seen; 3 for anything else) so the board
+ *     always has a "what next" for a contacted person. The recruiter can edit it.
+ *
+ * The message itself lives in the log, which the drawer shows as an activity
+ * timeline — it is no longer copied into the private notes field.
  */
 export async function logOutreach(
   candidateId: string,
@@ -405,10 +422,13 @@ export async function logOutreach(
   messageBody: string,
   templateId?: string
 ): Promise<CandidateProfile | null> {
-  const exists = await prisma.candidate.findUnique({ where: { id: candidateId }, select: { id: true, notes: true } });
+  const exists = await prisma.candidate.findUnique({ where: { id: candidateId }, select: { id: true, status: true, nextFollowUp: true } });
   if (!exists) return null;
 
   const now = new Date();
+  const advance = !isAtLeast(exists.status as CandidateStatus, 'Contacted');
+  const followUp = exists.nextFollowUp ?? new Date(now.getTime() + defaultFollowUpDays(channel) * 86_400_000);
+
   const [, row] = await prisma.$transaction([
     prisma.outreachLog.create({
       data: {
@@ -416,24 +436,43 @@ export async function logOutreach(
         channel: outreachChannelToPrisma(channel) as any,
         messageBody,
         sentAt: now,
+        followUpDate: followUp,
         sentById: userId ?? undefined,
       },
     }),
     prisma.candidate.update({
       where: { id: candidateId },
       data: {
-        status: 'Contacted',
+        ...(advance ? { status: 'Contacted', stageChangedAt: now } : {}),
         outreachChannel: outreachChannelToPrisma(channel) as any,
         outreachDate: now,
+        nextFollowUp: followUp,
         templateUsedId: templateId ?? undefined,
         lastUpdatedById: userId ?? undefined,
-        notes:
-          (exists.notes ? exists.notes + '\n\n' : '') +
-          `[${now.toLocaleDateString()}] Outreach via ${channel}:\n${messageBody}`,
       },
     }),
   ]);
   return toCandidateProfile(row);
+}
+
+/** Every outreach logged against a candidate, newest first — the drawer's activity timeline. */
+export async function listOutreachLogs(candidateId: string): Promise<OutreachLog[]> {
+  const rows = await prisma.outreachLog.findMany({
+    where: { candidateId },
+    orderBy: { sentAt: 'desc' },
+    include: { sentBy: { select: { name: true, email: true } } },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    candidate_id: r.candidateId,
+    channel: outreachChannelFromPrisma(r.channel),
+    sent_at: r.sentAt.toISOString(),
+    message_body: r.messageBody,
+    notes: r.notes ?? undefined,
+    follow_up_date: r.followUpDate ? r.followUpDate.toISOString() : undefined,
+    tags: r.tags != null ? (r.tags as string[]) : undefined,
+    sent_by: r.sentBy?.name ?? r.sentBy?.email ?? undefined,
+  }));
 }
 
 export interface CandidateListFilter {

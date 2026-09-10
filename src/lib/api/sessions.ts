@@ -7,8 +7,7 @@ import type {
   OutreachChannel,
   SessionSummary,
   StructuredJD,
-  XRayQuery,
-} from '../types';
+  XRayQuery, OutreachLog } from '../types';
 import type { QueryRunResult, SearchStats } from '../search/x-raySearchService';
 import type { SerpOptions } from '../search/serpConfig';
 import { postNdjson, type ProgressEvent } from './stream';
@@ -141,6 +140,12 @@ export async function updateCandidate(id: string, patch: CandidatePatch): Promis
     body: JSON.stringify(patch),
   });
   return data.candidate;
+}
+
+/** The candidate's outreach history, newest first. */
+export async function listOutreach(id: string): Promise<OutreachLog[]> {
+  const data = await request<{ logs: OutreachLog[] }>(`/api/candidates/${encodeURIComponent(id)}/outreach`);
+  return data.logs;
 }
 
 export async function logOutreach(id: string, channel: OutreachChannel, message: string, templateId?: string): Promise<CandidateProfile> {
