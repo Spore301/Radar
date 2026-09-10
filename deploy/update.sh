@@ -13,6 +13,15 @@ docker compose build --pull app
 echo "[radar] restarting"
 docker compose up -d
 
+# Compose only recreates caddy when its own config changes, not when the
+# Caddyfile does, so apply any pulled Caddyfile edits explicitly. Validate
+# first: a bad file would otherwise take the proxy down.
+if docker compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 && echo "[radar] caddy reloaded"
+else
+  echo "[radar] WARNING: deploy/Caddyfile failed validation; caddy kept its previous config" >&2
+fi
+
 echo "[radar] cleaning old images"
 docker image prune -f >/dev/null
 

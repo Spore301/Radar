@@ -33,7 +33,12 @@ services:
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env, e.g. radr.example.com}
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount the directory, not the single file. git replaces a file by
+      # writing a new one and renaming it, and a single-file bind mount keeps
+      # pointing at the old inode, so after `git pull` the container would
+      # still see (and `caddy reload` would re-apply) the previous Caddyfile.
+      # With the directory mounted, /etc/caddy/Caddyfile resolves fresh.
+      - ./deploy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
 
