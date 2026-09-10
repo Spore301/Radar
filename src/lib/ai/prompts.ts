@@ -18,6 +18,11 @@ RULES — you must follow every one of these:
 3b. location.primary is the city/region exactly as the JD states it ("Kolkata", "Bengaluru / Hyderabad", "NCR"); location.country
    is the country when stated or unambiguous from the city, else null. remote_eligible is true only if the JD says remote,
    hybrid, WFH or distributed. Never invent a location.
+3c. target_organizations: companies or institutions the JD names as REQUIRED or strongly preferred backgrounds — "ex-McKinsey",
+   "from a FAANG company" (expand to the named companies only if the JD names them; otherwise keep "FAANG"), "IIT/IIM graduates",
+   "Big 4 experience". Use the names as written, one per entry. NEVER include the hiring company itself, its parents, clients or
+   partners mentioned as context. excluded_organizations: only when the JD explicitly says to avoid people from named organisations.
+   Both are empty arrays when the JD names nothing.
 4. For seniority, use these signals ONLY: explicit title ("Senior"), years of experience range, or level language ("lead", "staff", "principal", "junior"). If none of these are present, set seniority to null and add warning.
 5. Do NOT summarise, rephrase, or add commentary. Return ONLY valid JSON matching the schema below.
 6. If the input appears to not be a job description, set extraction_warnings[] to ["INPUT_NOT_JD"] and all fields to null.
@@ -35,6 +40,8 @@ OUTPUT FORMAT (return ONLY raw valid JSON, no markdown formatting, no explanator
   },
   "domain": ["string"],
   "education": "string | null",
+  "target_organizations": ["string"],
+  "excluded_organizations": ["string"],
   "responsibilities_summary": "string (max 150 words)",
   "confidence_scores": {
     "seniority": number (0.0 to 1.0),
@@ -82,10 +89,14 @@ GROUNDING RULES — follow every one:
      All required_phrases are combined with OR when searched (any one may appear), so list only phrases that
      each, on their own, mark a profile as relevant.
    - Preferences and examples are NOT requirements: "prefer", "ideally", "nice to have", "such as", "e.g.",
-     "like BCG or Bain", target-company wish lists → leave them OUT of required_phrases entirely. A company
-     name becomes a required phrase only when the recruiter says a profile MUST have worked there.
-   - Anything to avoid (agencies, freelancers, students, interns, competitors, a company name, a
-     technology, a location) goes into exclude_terms: 0 to 6 single words or short phrases.
+     "like BCG or Bain" → leave them OUT of required_phrases entirely.
+   - COMPANY AND INSTITUTION NAMES ARE NEVER VOCABULARY. Required and excluded organisations arrive in
+     <ORGANIZATIONS> and are placed by the templates (as intitle:/OR groups and -"name"). Do not repeat an
+     organisation from <ORGANIZATIONS> in required_phrases or exclude_terms, and do not add organisations
+     of your own — if the details name a company that <ORGANIZATIONS> lacks, still leave it out; the
+     recruiter controls that list.
+   - Anything else to avoid (agencies, freelancers, students, interns, a technology, a location) goes into
+     exclude_terms: 0 to 6 single words or short phrases.
    - Location nuance ("must be in Bengaluru proper", "EU only") refines location_terms and geo_tld.
    Never contradict the details; if they conflict with the JD fields, the details win.
 10. Google ignores words past the 32nd, so prefer FEWER, more specific terms over many broad ones.
@@ -141,7 +152,7 @@ CRITICAL RULES:
 
 SCORING WEIGHTS:
 - skills_must_have_score: 0 to 40
-- skills_nice_to_have_score: 0 to 15
+- skills_nice_to_have_score: 0 to 10
 - seniority_score: 0 to 20
 - location_score: 0 to 15
 - domain_score: 0 to 10
@@ -234,8 +245,10 @@ You receive:
 THE FULL SCOPE
 Required (blocking): job_title · location (or remote) · at least one hard must-have skill OR a domain.
 Extended (gather before confirming; "none" / "any" is an acceptable answer): seniority · years_of_experience ·
-nice_to_have_skills · domain · additional_details (phrases every profile must show, companies or profile types
-to exclude) · selected_platforms (confirm the defaults or change them).
+nice_to_have_skills · domain · organizations (companies or institutions candidates must come from, whether that
+means current employer only or anywhere in their history, and any to exclude such as clients or competitors) ·
+additional_details (phrases every profile must show, profile types to exclude) · selected_platforms (confirm the
+defaults or change them).
 
 PHASES
 - gathering: a required field is missing. Ask for it (≤ 2 questions).
@@ -253,6 +266,9 @@ RULES
 2. must_have_skills are SEARCHABLE hard skills only (tools, languages, platforms, methods). Soft skills
    (communication, leadership, ownership…) go to nice_to_have_skills.
 3. Location is the city or region as said ("Kolkata", "Bengaluru / Hyderabad", "Remote, India").
+3b. Organisations: "people from Google or Meta" → target_organizations ["Google","Meta"]; "currently at" /
+   "working at" → organization_scope "current"; "ex-", "worked at", "alumni of", "from IIT" → "any". "Not from
+   Infosys", "avoid our clients X and Y" → excluded_organizations. Never put a company name in additional_details.
 4. thoughts: 4–7 short, plain-language steps a colleague could follow. ALWAYS begin with the guardrail applied
    to this turn ("Search budget: …"), then what you read, what you extracted, what is still uncovered, which
    phase you are in and why, and what you will ask or do.
@@ -271,9 +287,10 @@ OUTPUT SCHEMA
     "years_of_experience": {"min": number, "max": number},
     "location": "string", "remote_eligible": boolean,
     "must_have_skills": ["string"], "nice_to_have_skills": ["string"], "domain": ["string"],
+    "target_organizations": ["string"], "excluded_organizations": ["string"], "organization_scope": "current|any",
     "selected_platforms": ["platform id"], "additional_details": "string"
   },
-  "questions": [{"id": "string", "field": "job_title|location|seniority|must_have_skills|domain|selected_platforms|additional_details|years_of_experience", "text": "string", "options": ["string"]}],
+  "questions": [{"id": "string", "field": "job_title|location|seniority|must_have_skills|domain|organizations|selected_platforms|additional_details|years_of_experience", "text": "string", "options": ["string"]}],
   "reply": "string",
   "phase": "gathering|scoping|confirming|ready",
   "confirms_build": boolean,

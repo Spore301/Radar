@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { CandidateProfile, OutreachChannel, CandidateStatus, OutreachLog } from '@/lib/types';
-import { X, ExternalLink, MapPin, ChevronDown, Send } from 'lucide-react';
+import { X, ExternalLink, MapPin, ChevronDown, Send, Building2 } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { Avatar } from '@/components/ui/Avatar';
 import { scoreTier, TIER_LABEL, TIER_TEXT } from '@/lib/utils/tier';
@@ -18,13 +18,21 @@ interface CandidateDetailDrawerProps {
   onOpenAIGenerator: (candidate: CandidateProfile) => void;
 }
 
-const BREAKDOWN: Array<{ key: keyof CandidateProfile['match_breakdown']; label: string; max: number }> = [
-  { key: 'skills_must_have_score', label: 'Must-have skills', max: 40 },
-  { key: 'skills_nice_to_have_score', label: 'Nice-to-have skills', max: 15 },
-  { key: 'seniority_score', label: 'Seniority', max: 20 },
-  { key: 'location_score', label: 'Location / remote', max: 15 },
-  { key: 'domain_score', label: 'Domain', max: 10 },
-];
+type BreakdownRow = { key: keyof CandidateProfile['match_breakdown']; label: string; max: number };
+
+// Rows scored before organisation tracking carry a 40/15 split and no
+// organisation component; the maxima shown must match how they were scored.
+function breakdownRows(b: CandidateProfile['match_breakdown']): BreakdownRow[] {
+  const legacy = b.organization_score === undefined;
+  return [
+    { key: 'skills_must_have_score', label: 'Must-have skills', max: legacy ? 40 : 35 },
+    { key: 'skills_nice_to_have_score', label: 'Nice-to-have skills', max: legacy ? 15 : 10 },
+    { key: 'seniority_score', label: 'Seniority', max: 20 },
+    { key: 'location_score', label: 'Location / remote', max: 15 },
+    { key: 'domain_score', label: 'Domain', max: 10 },
+    ...(legacy ? [] : [{ key: 'organization_score', label: 'Company / institution', max: 10 } as BreakdownRow]),
+  ];
+}
 
 /** First touch on LinkedIn is a connection note; elsewhere, email. */
 function preferredChannelFor(c: CandidateProfile): OutreachChannel {
@@ -107,6 +115,11 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
             <p className="text-body-sm text-body line-clamp-2">{candidate.headline}</p>
             <div className="mt-1.5 flex items-center gap-2 text-body-xs text-mute">
               <PlatformBadge platform={candidate.platform} />
+              {candidate.organization_match && (
+                <span className="chip-ink" title="Required organisation found on the profile">
+                  <Building2 className="w-3 h-3" /> {candidate.organization_match}
+                </span>
+              )}
               <span className="flex items-center gap-1 truncate">
                 <MapPin className="w-3 h-3" /> {candidate.location}
               </span>
@@ -206,8 +219,8 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
               </span>
             </div>
             <dl className="grid grid-cols-[1fr_120px_44px] gap-x-3 gap-y-2 items-center text-body-sm">
-              {BREAKDOWN.map((row) => {
-                const v = candidate.match_breakdown[row.key];
+              {breakdownRows(candidate.match_breakdown).map((row) => {
+                const v = candidate.match_breakdown[row.key] ?? 0;
                 return (
                   <React.Fragment key={row.key}>
                     <dt className="text-body">{row.label}</dt>

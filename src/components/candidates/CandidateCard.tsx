@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { CandidateProfile } from '@/lib/types';
-import { MapPin, ExternalLink, Check } from 'lucide-react';
+import { MapPin, ExternalLink, Check, Building2 } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { Avatar } from '@/components/ui/Avatar';
 import { scoreTier, TIER_BG, TIER_LABEL, TIER_TEXT } from '@/lib/utils/tier';
@@ -69,6 +69,11 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
         </div>
         <div className="flex items-center gap-3 text-body-xs text-mute md:w-56 min-w-0">
           <PlatformBadge platform={candidate.platform} />
+          {candidate.organization_match && (
+            <span className="chip-ink" data-org-match={candidate.organization_match}>
+              <Building2 className="w-3 h-3" /> {candidate.organization_match}
+            </span>
+          )}
           <span className="truncate flex items-center gap-1">
             <MapPin className="w-3 h-3" /> {candidate.location}
           </span>
@@ -98,6 +103,11 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
       <ScoreBar score={candidate.match_score} />
 
       <div className="flex flex-wrap gap-1 min-h-[22px]">
+        {candidate.organization_match && (
+          <span className="chip-ink" title="Required organisation found on the profile" data-org-match={candidate.organization_match}>
+            <Building2 className="w-3 h-3" /> {candidate.organization_match}
+          </span>
+        )}
         {candidate.skills_detected.slice(0, 4).map((skill) => (
           <span key={skill} className="chip">
             {skill}

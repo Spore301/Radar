@@ -57,6 +57,8 @@ const structuredJdSchema: z.ZodType<StructuredJD> = z.object({
   }),
   domain: z.array(z.string()),
   education: z.string().nullable(),
+  target_organizations: z.array(z.string()).optional(),
+  excluded_organizations: z.array(z.string()).optional(),
   responsibilities_summary: z.string(),
   confidence_scores: z.object({
     seniority: z.number(),
@@ -89,6 +91,9 @@ const mergedConstraintsSchema: z.ZodType<MergedConstraints> = z.object({
     .optional(),
   additional_details: z.string().optional(),
   soft_constraints: z.string().optional(),
+  target_organizations: z.array(z.string()).optional(),
+  excluded_organizations: z.array(z.string()).optional(),
+  organization_scope: z.enum(['current', 'any']).optional(),
   results_cap: z.number(),
 });
 
@@ -119,6 +124,7 @@ const matchBreakdownSchema: z.ZodType<MatchBreakdown> = z.object({
   seniority_score: z.number(),
   location_score: z.number(),
   domain_score: z.number(),
+  organization_score: z.number().optional(),
 });
 
 const stringArraySchema = z.array(z.string());
@@ -232,6 +238,7 @@ export function toCandidateProfile(row: CandidateRow): CandidateProfile {
     missing_signals: jsonStringArray(row.missingSignals),
     data_completeness: row.dataCompleteness,
     raw_scraped_data: (row.rawScrapedData as Record<string, any> | null) ?? undefined,
+    organization_match: ((row.rawScrapedData as Record<string, any> | null)?.organization_match as string | null | undefined) ?? undefined,
     source_query: row.sourceQueryId ?? undefined,
     scrape_status: row.scrapeStatus,
     status: row.status,

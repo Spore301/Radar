@@ -54,6 +54,17 @@ export interface QueryTerms {
    * -"term" to every query — e.g. agency, freelance, intern, a competitor name.
    */
   exclude_terms: string[];
+  /**
+   * Companies / institutions a profile must show at least one of. OR'd into
+   * every query right after the site operator; on LinkedIn with org_scope
+   * 'current' it becomes intitle:(…) because the page title carries the
+   * current employer. Max 6 per query — the word budget is the limit.
+   */
+  target_orgs: string[];
+  /** Companies / institutions whose mention disqualifies a result: -"name" on every query. */
+  excluded_orgs: string[];
+  /** 'current' — current employer only (LinkedIn title); 'any' — anywhere on the page. */
+  org_scope: 'current' | 'any';
 }
 
 export interface XRayTemplate {
@@ -178,12 +189,36 @@ export function requiredClause(t: QueryTerms): string {
   return orGroup(alternatives, 4);
 }
 
-/** Recruiter exclusions as -"term" (multi-word) or -term (single word). */
+/** Recruiter exclusions as -"term" (multi-word) or -term (single word); excluded organisations ride along. */
 export function excludeClause(t: QueryTerms): string {
-  return uniq(t.exclude_terms ?? [])
-    .slice(0, 6)
-    .map((x) => (/\s/.test(x) ? `-${quote(x)}` : `-${x.replace(/^-+/, '')}`))
+  const negate = (x: string) => (/\s/.test(x) ? `-${quote(x)}` : `-${x.replace(/^-+/, '')}`);
+  return uniq([...(t.exclude_terms ?? []).slice(0, 6), ...(t.excluded_orgs ?? []).slice(0, 4)])
+    .map(negate)
     .join(' ');
+}
+
+/**
+ * The organisation constraint for one template. LinkedIn page titles read
+ * "Name – Title – Company", so "current employer only" is enforceable there
+ * with intitle:; everywhere else (and for 'any') a plain OR group means the
+ * name appears somewhere on the page — current or past.
+ */
+export function orgClause(t: QueryTerms, platform: CandidatePlatform): string {
+  const group = orGroup(t.target_orgs ?? [], 6);
+  if (!group) return '';
+  return platform === 'LinkedIn' && t.org_scope === 'current' ? `intitle:${group}` : group;
+}
+
+// Inserts the organisation clause right after the leading site:/filetype:
+// operator (or a parenthesised group of them), so the query reads naturally in
+// the preview. Google itself is indifferent to operator order.
+const LEADING_OPERATOR = /^(\((?:site|filetype):\S+(?:\s+OR\s+(?:site|filetype):\S+)*\)|(?:site|filetype):\S+)\s*/;
+
+function withOrgClause(query: string, t: QueryTerms, platform: CandidatePlatform): string {
+  const clause = orgClause(t, platform);
+  if (!clause) return query;
+  const m = query.match(LEADING_OPERATOR);
+  return m ? `${m[1]} ${clause} ${query.slice(m[0].length)}`.trim() : `${clause} ${query}`;
 }
 
 // --- Google's word budget ---------------------------------------------------
@@ -217,16 +252,19 @@ function fitToBudget(tpl: XRayTemplate, terms: QueryTerms): string | null {
     (t) => ({ ...t, location_terms: t.location_terms.slice(0, 1), domain_terms: (t.domain_terms ?? []).slice(0, 2) }),
     (t) => ({ ...t, must_have_skills: t.must_have_skills.slice(0, 2) }),
     (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 2), discipline_terms: t.discipline_terms.slice(0, 2), role_adjacent_terms: t.role_adjacent_terms.slice(0, 2) }),
-    (t) => ({ ...t, exclude_terms: t.exclude_terms.slice(0, 3) }),
+    (t) => ({ ...t, exclude_terms: t.exclude_terms.slice(0, 3), excluded_orgs: (t.excluded_orgs ?? []).slice(0, 2) }),
+    (t) => ({ ...t, target_orgs: (t.target_orgs ?? []).slice(0, 4) }),
     (t) => ({ ...t, required_phrases: t.required_phrases.slice(0, 2) }),
+    (t) => ({ ...t, target_orgs: (t.target_orgs ?? []).slice(0, 3) }),
     (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 1), must_have_skills: t.must_have_skills.slice(0, 1) }),
   ];
   let current = terms;
   let built: string | null = null;
   for (const step of attempts) {
     current = step(current);
-    built = tpl.build(current);
-    if (!built) return null;
+    const raw = tpl.build(current);
+    if (!raw) return null;
+    built = withOrgClause(raw, current, tpl.platform);
     if (countGoogleWords(built) <= GOOGLE_WORD_LIMIT) return built;
   }
   return built;
@@ -765,6 +803,9 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
     geo_tld,
     required_phrases: details.required_phrases,
     exclude_terms: details.exclude_terms,
+    target_orgs: uniq((constraints.target_organizations ?? []).map((o) => o.trim()).filter(Boolean)).slice(0, 6),
+    excluded_orgs: uniq((constraints.excluded_organizations ?? []).map((o) => o.trim()).filter(Boolean)).slice(0, 4),
+    org_scope: constraints.organization_scope === 'current' ? 'current' : 'any',
   };
 }
 
@@ -807,5 +848,10 @@ export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null
     // heuristic parser found stays, the model can only sharpen or extend it.
     required_phrases: uniq([...(strList(ai.required_phrases, 3) ?? []), ...base.required_phrases]).slice(0, 3),
     exclude_terms: uniq([...base.exclude_terms, ...(strList(ai.exclude_terms, 6) ?? [])]).slice(0, 6),
+    // Organisations are a hard constraint the recruiter typed; the model is
+    // told about them but cannot add, drop or rename one.
+    target_orgs: base.target_orgs,
+    excluded_orgs: base.excluded_orgs,
+    org_scope: base.org_scope,
   };
 }

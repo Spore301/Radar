@@ -29,6 +29,7 @@ export function uncoveredScope(c: MergedConstraints, state: AgentState): AgentFi
   if (c.seniority === 'Any' && !covered.has('seniority')) out.push('seniority');
   if (c.years_of_experience.min === 0 && c.years_of_experience.max === 10 && !covered.has('years_of_experience') && c.seniority === 'Any') out.push('years_of_experience');
   if (c.domain.length === 0 && !covered.has('domain')) out.push('domain');
+  if (!(c.target_organizations?.length || c.excluded_organizations?.length) && !covered.has('organizations')) out.push('organizations');
   if (!c.additional_details?.trim() && !covered.has('additional_details')) out.push('additional_details');
   if (!covered.has('selected_platforms')) out.push('selected_platforms');
   return out;
@@ -49,6 +50,18 @@ export function buildScope(c: MergedConstraints, state: AgentState): ScopeItem[]
     { field: 'seniority', label: 'Seniority', state: c.seniority !== 'Any' || covered.has('seniority') ? 'done' : 'pending', value: c.seniority !== 'Any' ? c.seniority : covered.has('seniority') ? 'Any' : undefined },
     { field: 'years_of_experience', label: 'Experience', state: !(yrs.min === 0 && yrs.max === 10) || covered.has('years_of_experience') || c.seniority !== 'Any' ? 'done' : 'optional', value: !(yrs.min === 0 && yrs.max === 10) ? `${yrs.min}–${yrs.max} yrs` : covered.has('years_of_experience') ? 'any' : c.seniority !== 'Any' ? `implied by ${c.seniority}` : undefined },
     { field: 'domain', label: 'Domain / industry', state: c.domain.length || covered.has('domain') ? 'done' : 'pending', value: c.domain.join(', ') || (covered.has('domain') ? 'none' : undefined) },
+    {
+      field: 'organizations',
+      label: 'Companies & institutions',
+      state: c.target_organizations?.length || c.excluded_organizations?.length || covered.has('organizations') ? 'done' : 'pending',
+      value:
+        [
+          c.target_organizations?.length ? `${c.organization_scope === 'current' ? 'currently at' : 'from'} ${c.target_organizations.join(', ')}` : '',
+          c.excluded_organizations?.length ? `not ${c.excluded_organizations.join(', ')}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ') || (covered.has('organizations') ? 'no preference' : undefined),
+    },
     { field: 'additional_details', label: 'Must-mention & exclusions', state: c.additional_details?.trim() || covered.has('additional_details') ? 'done' : 'pending', value: c.additional_details?.trim() || (covered.has('additional_details') ? 'none' : undefined) },
     { field: 'selected_platforms', label: 'Platforms', state: covered.has('selected_platforms') ? 'done' : 'pending', value: c.selected_platforms.map(platformLabel).join(', ') || undefined },
     { field: 'confirmation', label: 'Go-ahead to build queries', state: state.confirmed ? 'done' : 'pending', value: state.confirmed ? 'confirmed' : undefined },

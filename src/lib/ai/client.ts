@@ -145,7 +145,12 @@ Selected Platforms: ${platforms.join(', ')}
 
 <ADDITIONAL_DETAILS priority="highest">
 ${(constraints.additional_details ?? constraints.soft_constraints ?? '').trim() || '(none provided)'}
-</ADDITIONAL_DETAILS>`;
+</ADDITIONAL_DETAILS>
+
+<ORGANIZATIONS handled_by="templates">
+Must have worked/studied at one of: ${baseTerms.target_orgs.length ? baseTerms.target_orgs.join(', ') : '(none)'}${baseTerms.target_orgs.length ? ` — scope: ${baseTerms.org_scope === 'current' ? 'current employer only' : 'current or past'}` : ''}
+Excluded: ${baseTerms.excluded_orgs.length ? baseTerms.excluded_orgs.join(', ') : '(none)'}
+</ORGANIZATIONS>`;
 
   const aiTerms = await callDeepSeekAPI<Partial<QueryTerms>>(userPrompt, XRAY_QUERY_TERMS_SYSTEM_PROMPT, apiKey);
   const terms = mergeQueryTerms(baseTerms, aiTerms);
@@ -226,6 +231,8 @@ export function coerceStructuredJD(raw: any): StructuredJD | null {
     skills: { must_have: strList(raw.skills?.must_have), nice_to_have: strList(raw.skills?.nice_to_have) },
     domain: strList(raw.domain, 8),
     education: typeof raw.education === 'string' && raw.education.trim() ? raw.education.trim() : null,
+    target_organizations: strList(raw.target_organizations, 8),
+    excluded_organizations: strList(raw.excluded_organizations, 6),
     responsibilities_summary: typeof raw.responsibilities_summary === 'string' ? raw.responsibilities_summary.trim().slice(0, 1200) : '',
     confidence_scores: {
       seniority: typeof raw.confidence_scores?.seniority === 'number' ? Math.min(1, Math.max(0, raw.confidence_scores.seniority)) : seniority ? 0.7 : 0,
@@ -245,6 +252,8 @@ function emptyStructuredJD(): StructuredJD {
     skills: { must_have: [], nice_to_have: [] },
     domain: [],
     education: null,
+    target_organizations: [],
+    excluded_organizations: [],
     responsibilities_summary: '',
     confidence_scores: { seniority: 0, skills_must_have: 0 },
     extraction_warnings: [],
@@ -301,6 +310,11 @@ export function constraintsFromStructuredJD(structured: StructuredJD, jdText: st
     education: structured.education ?? '',
     selected_platforms: defaultPlatformsForRole(roleType),
     additional_details: '',
+    // A JD that names backgrounds ("ex-McKinsey", "from FAANG") means the
+    // history, not the current employer — so the scope starts at 'any'.
+    target_organizations: structured.target_organizations ?? [],
+    excluded_organizations: structured.excluded_organizations ?? [],
+    organization_scope: 'any',
     results_cap: 50,
   };
 }
@@ -326,6 +340,8 @@ function mergeStructured(ai: StructuredJD, heuristic: StructuredJD): StructuredJ
     },
     domain: ai.domain.length ? ai.domain : heuristic.domain,
     education: ai.education ?? heuristic.education,
+    target_organizations: ai.target_organizations?.length ? ai.target_organizations : heuristic.target_organizations ?? [],
+    excluded_organizations: ai.excluded_organizations?.length ? ai.excluded_organizations : heuristic.excluded_organizations ?? [],
     responsibilities_summary: ai.responsibilities_summary || heuristic.responsibilities_summary,
     confidence_scores: ai.confidence_scores,
     extraction_warnings: Array.from(new Set([...ai.extraction_warnings, ...heuristic.extraction_warnings.filter((w) => /location|skill/i.test(w) && !ai.location.primary)])),

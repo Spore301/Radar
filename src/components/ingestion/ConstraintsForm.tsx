@@ -191,6 +191,42 @@ export function ConstraintsForm({ structuredJD, initialConstraints, onSubmit, is
           <TagInput values={c.nice_to_have_skills} onChange={(v) => setC({ ...c, nice_to_have_skills: v })} placeholder="Add a secondary skill" />
         </div>
 
+        {/* Where they work or have worked — a hard constraint enforced in the query itself. */}
+        <div className="flex flex-col gap-3" data-organizations>
+          <span className="field-label flex justify-between">
+            Companies &amp; institutions
+            <span className="text-mute font-normal">Hard constraint · applied to every query</span>
+          </span>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-body-xs text-body">Must have worked or studied at <span className="text-mute">(any one of)</span></span>
+              <TagInput values={c.target_organizations ?? []} onChange={(v) => setC({ ...c, target_organizations: v })} placeholder="e.g. Google, McKinsey, IIT Bombay" />
+              {(c.target_organizations?.length ?? 0) > 0 && (
+                <div className="seg self-start" role="group" aria-label="Organisation scope">
+                  <button type="button" aria-pressed={(c.organization_scope ?? 'any') === 'any'} onClick={() => setC({ ...c, organization_scope: 'any' })} className="seg-item">
+                    Current or past
+                  </button>
+                  <button type="button" aria-pressed={c.organization_scope === 'current'} onClick={() => setC({ ...c, organization_scope: 'current' })} className="seg-item">
+                    Current employer only
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-body-xs text-body">Exclude <span className="text-mute">(clients, competitors, your own company)</span></span>
+              <TagInput values={c.excluded_organizations ?? []} onChange={(v) => setC({ ...c, excluded_organizations: v })} placeholder="e.g. Infosys, Acme" />
+            </div>
+          </div>
+          <p className="text-body-xs text-mute">
+            {(c.target_organizations?.length ?? 0) > 6 && <span className="text-warning-deep">Only the first six are searched per query — Google stops reading at 32 words. </span>}
+            Required names are OR'd into every query, so a profile must show at least one.{' '}
+            {c.organization_scope === 'current'
+              ? 'On LinkedIn, "current employer only" matches the page title (Name – Title – Company), so it holds there; on other platforms any mention counts.'
+              : 'Any mention on the page counts — current role, past roles or education.'}{' '}
+            Excluded names are removed from every query as -"name".
+          </p>
+        </div>
+
         <div className="flex flex-col gap-2">
           <span className="field-label flex justify-between">
             Platforms
@@ -237,7 +273,7 @@ export function ConstraintsForm({ structuredJD, initialConstraints, onSubmit, is
               '• Must have shipped a "design system" at a B2B SaaS company.\n' +
               '• No agencies, no freelancers, no students or interns.\n' +
               '• Title on profile should say Product Designer, not Graphic Designer.\n' +
-              '• Exclude anyone currently at Acme or Globex.'
+              '• (Companies to require or exclude go in the field above, not here.)'
             }
           />
           <p className="text-body-xs text-mute">

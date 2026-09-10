@@ -61,6 +61,9 @@ const EMPTY: MergedConstraints = {
   education: '',
   selected_platforms: [],
   additional_details: '',
+  target_organizations: [],
+  excluded_organizations: [],
+  organization_scope: 'any',
   results_cap: 50,
 };
 
@@ -96,6 +99,12 @@ function mergeConstraints(prev: MergedConstraints, next: AgentModelOutput['const
   }
   if (next.nice_to_have_skills?.length) out.nice_to_have_skills = uniq([...out.nice_to_have_skills, ...next.nice_to_have_skills]).filter((s) => !out.must_have_skills.includes(s));
   if (next.domain?.length) out.domain = uniq([...prev.domain, ...next.domain]).slice(0, 6);
+  if (next.target_organizations?.length) out.target_organizations = uniq([...(prev.target_organizations ?? []), ...next.target_organizations]).slice(0, 8);
+  if (next.excluded_organizations?.length) {
+    out.excluded_organizations = uniq([...(prev.excluded_organizations ?? []), ...next.excluded_organizations]).slice(0, 6);
+    out.target_organizations = (out.target_organizations ?? []).filter((o) => !out.excluded_organizations!.some((x) => x.toLowerCase() === o.toLowerCase()));
+  }
+  if (next.organization_scope === 'current' || next.organization_scope === 'any') out.organization_scope = next.organization_scope;
   if (next.selected_platforms?.length) out.selected_platforms = sanitizeSelectedPlatforms(next.selected_platforms, out.role_type);
   if (typeof next.additional_details === 'string' && next.additional_details.trim()) {
     out.additional_details = uniq([...(prev.additional_details ?? '').split('\n'), next.additional_details.trim()]).join('\n');
@@ -115,6 +124,12 @@ const QUESTION_CATALOGUE: Record<AgentField, AgentQuestion> = {
   seniority: { id: 'q-seniority', field: 'seniority', text: 'How senior is the role?', options: ['Junior', 'Mid', 'Senior', 'Staff', 'Lead', 'Any'] },
   years_of_experience: { id: 'q-years', field: 'years_of_experience', text: 'How many years of experience should they have?', options: ['0–2', '2–5', '5–8', '8+', 'Any'] },
   domain: { id: 'q-domain', field: 'domain', text: 'Which industry or domain should candidates come from?', options: ['None in particular'] },
+  organizations: {
+    id: 'q-orgs',
+    field: 'organizations',
+    text: 'Should candidates come from specific companies or institutions — and does that mean their current employer, or anywhere in their history? Any to exclude, such as clients or competitors?',
+    options: ['No preference'],
+  },
   additional_details: { id: 'q-details', field: 'additional_details', text: 'Anything that must appear on a profile, or must not — exact phrases, companies to avoid, profile types to exclude (agencies, freelancers, students)?', options: ['None'] },
   selected_platforms: { id: 'q-platforms', field: 'selected_platforms', text: 'I plan to search these platforms. Keep them, or name the ones you want?', options: ['Keep them'] },
 };
@@ -131,6 +146,8 @@ function scopeSummary(c: MergedConstraints): string {
     c.location ? `in ${c.location}${c.remote_eligible ? ' (remote OK)' : ''}` : c.remote_eligible ? 'remote' : '',
     c.must_have_skills.length ? `must have ${c.must_have_skills.join(', ')}` : '',
     c.domain.length ? `in ${c.domain.join(' / ')}` : '',
+    c.target_organizations?.length ? `${c.organization_scope === 'current' ? 'currently at' : 'from'} ${c.target_organizations.join(', ')}` : '',
+    c.excluded_organizations?.length ? `excluding ${c.excluded_organizations.join(', ')}` : '',
     !(c.years_of_experience.min === 0 && c.years_of_experience.max === 10) ? `${c.years_of_experience.min}–${c.years_of_experience.max} years` : '',
     c.additional_details?.trim() ? `with: ${c.additional_details.trim().replace(/\n/g, '; ')}` : 'no extra exclusions',
     `across ${c.selected_platforms.map(platformLabel).join(', ')}`,
@@ -180,6 +197,21 @@ function applyReplyToAsked(prev: MergedConstraints, state: AgentState, lastAsked
       c.must_have_skills = uniq([...c.must_have_skills, ...t.split(/[,/]|\band\b/).map((x) => x.trim()).filter((x) => x && !isSoftSkill(x))]);
     } else if (f === 'domain' && t.split(/\s+/).length <= 10) {
       c.domain = uniq([...c.domain, ...t.split(/[,/]|\band\b/).map((x) => x.trim()).filter(Boolean)]).slice(0, 6);
+    } else if (f === 'organizations' && t.split(/\s+/).length <= 24) {
+      // "Google, Meta or Amazon — current only; not Infosys" → targets, scope, exclusions.
+      const [positive, ...negatives] = t.split(/\b(?:not|no|exclude|excluding|avoid|except|but not)\b/i);
+      const names = (chunk: string) =>
+        chunk
+          .replace(/\b(currently|current(ly)? (at|employed)|working at|employed at|worked at|ex-?|alumni of|from|at|only|people|candidates|anyone)\b/gi, ' ')
+          .split(/[,/;]|\bor\b|\band\b/i)
+          .map((x) => x.replace(/[—–-]+$/g, '').trim())
+          .filter((x) => x && x.length <= 40 && !/^(none|any|no preference)$/i.test(x));
+      const targets = names(positive);
+      const excluded = negatives.flatMap(names);
+      if (targets.length) c.target_organizations = uniq([...(c.target_organizations ?? []), ...targets]).slice(0, 8);
+      if (excluded.length) c.excluded_organizations = uniq([...(c.excluded_organizations ?? []), ...excluded]).slice(0, 6);
+      if (/\b(current(ly)?|working at|employed)\b/i.test(positive)) c.organization_scope = 'current';
+      else if (/\b(ex-?|worked at|alumni|past|history|any(where)?)\b/i.test(positive)) c.organization_scope = 'any';
     } else if (f === 'additional_details') {
       c.additional_details = uniq([...(c.additional_details ?? '').split('\n'), t]).join('\n');
     } else if (f === 'selected_platforms') {

@@ -10,7 +10,7 @@ import type { MergedConstraints, XRayQuery } from '../types';
 // query bundle the dashboard would.
 // ---------------------------------------------------------------------------
 
-export type AgentField = 'job_title' | 'location' | 'seniority' | 'must_have_skills' | 'domain' | 'selected_platforms' | 'additional_details' | 'years_of_experience';
+export type AgentField = 'job_title' | 'location' | 'seniority' | 'must_have_skills' | 'domain' | 'organizations' | 'selected_platforms' | 'additional_details' | 'years_of_experience';
 
 export interface AgentQuestion {
   id: string;
@@ -97,6 +97,9 @@ export interface AgentModelOutput {
     must_have_skills: string[];
     nice_to_have_skills: string[];
     domain: string[];
+    target_organizations: string[];
+    excluded_organizations: string[];
+    organization_scope: 'current' | 'any';
     selected_platforms: string[];
     additional_details: string;
   }>;

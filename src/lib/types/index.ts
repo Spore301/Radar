@@ -55,6 +55,10 @@ export interface StructuredJD {
   };
   domain: string[];
   education: string | null;
+  /** Companies / institutions the JD names as required or strongly preferred backgrounds ("ex-McKinsey", "IIT/IIM"). Never the hiring company itself. */
+  target_organizations?: string[];
+  /** Companies / institutions the JD says to avoid. Rare. */
+  excluded_organizations?: string[];
   responsibilities_summary: string;
   confidence_scores: {
     seniority: number;
@@ -92,6 +96,22 @@ export interface MergedConstraints {
   additional_details?: string;
   /** @deprecated superseded by additional_details; still read for sessions saved before it existed. */
   soft_constraints?: string;
+  /**
+   * Hard constraint on where a candidate works or has worked / studied: a
+   * profile must show at least ONE of these (OR'd into every query). Up to six
+   * are searched per query. Companies and institutions alike — the X-Ray
+   * matches the name on the page either way.
+   */
+  target_organizations?: string[];
+  /** Profiles mentioning any of these are excluded from every query (-"name"). */
+  excluded_organizations?: string[];
+  /**
+   * 'current' — the organisation must be the CURRENT employer. Enforceable on
+   * LinkedIn, whose page title is "Name – Title – Company", via intitle:; on
+   * other platforms any mention counts. 'any' — current or past, anywhere on
+   * the page. Default 'any'.
+   */
+  organization_scope?: 'current' | 'any';
   results_cap: number;
 }
 
@@ -116,11 +136,13 @@ export interface KeywordMap {
 }
 
 export interface MatchBreakdown {
-  skills_must_have_score: number; // 0-40
-  skills_nice_to_have_score: number; // 0-15
+  skills_must_have_score: number; // 0-35 (0-40 on rows scored before organisation tracking)
+  skills_nice_to_have_score: number; // 0-10 (0-15 before)
   seniority_score: number; // 0-20
   location_score: number; // 0-15
   domain_score: number; // 0-10
+  /** 0-10. Full marks when no organisation was required; absent on rows scored before it existed. */
+  organization_score?: number;
 }
 
 export interface CandidateProfile {
@@ -139,6 +161,8 @@ export interface CandidateProfile {
   match_breakdown: MatchBreakdown;
   match_rationale: string;
   missing_signals: string[];
+  /** The target organisation found on the profile (title or snippet), when one was required. */
+  organization_match?: string | null;
   data_completeness: number; // 0-1
   raw_scraped_data?: Record<string, any>;
   source_query?: string;

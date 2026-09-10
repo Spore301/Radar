@@ -114,10 +114,31 @@ async function shot(page: Page, name: string) {
     check('9 platform tiles rendered', platformTiles === 9, `${platformTiles} tiles`);
     await shot(page, '03-constraints');
 
+    // --- companies & institutions: a hard constraint typed into the form -----------------
+    const orgs = page.locator('[data-organizations]');
+    check('constraints form offers a companies & institutions section', await orgs.isVisible());
+    await orgs.getByPlaceholder(/Google, McKinsey/).fill('Acme');
+    await orgs.getByPlaceholder(/Google, McKinsey/).press('Enter');
+    await orgs.getByRole('button', { name: 'Current employer only' }).click();
+    await orgs.getByPlaceholder(/Infosys, Acme/).fill('Infosys');
+    await orgs.getByPlaceholder(/Infosys, Acme/).press('Enter');
+    check('organisation chips added with current-employer scope', (await orgs.locator('.chip', { hasText: 'Acme' }).count()) === 1 && (await orgs.getByRole('button', { name: 'Current employer only' }).getAttribute('aria-pressed')) === 'true');
+    await shot(page, '03b-organisations');
+
     // --- generate queries ----------------------------------------------------
     await page.getByRole('button', { name: /^Generate \d+ quer/ }).click();
     await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).waitFor({ timeout: 60000 });
     const rows = await page.locator('[role="dialog"] [data-query-row]').count();
+    const rowTexts = (await page.locator('[role="dialog"] [data-query-row]').allTextContents()).map((t) => t.replace(/\s+/g, ' '));
+    const linkedinRows = rowTexts.filter((t) => t.includes('linkedin.com/in'));
+    check('LinkedIn queries carry the current-employer constraint as intitle:"Acme"', linkedinRows.length > 0 && linkedinRows.every((t) => /intitle:\s*"Acme"/.test(t)), `${linkedinRows.filter((t) => /intitle:\s*"Acme"/.test(t)).length}/${linkedinRows.length}`);
+    const nonLinkedin = rowTexts.filter((t) => !t.includes('linkedin.com/in'));
+    check('other platforms require the organisation as a plain mention', nonLinkedin.length > 0 && nonLinkedin.every((t) => /"Acme"/.test(t) && !/intitle:\s*"Acme"/.test(t)), `${nonLinkedin.filter((t) => /"Acme"/.test(t)).length}/${nonLinkedin.length}`);
+    // Exclusion pills draw the minus as chrome, not text — assert on the pill family instead.
+    const rowsWithExclusion = await page.locator('[role="dialog"] [data-query-row]').evaluateAll((els) =>
+      els.filter((row) => Array.from(row.querySelectorAll('[data-family="exclude"]')).some((p) => /Infosys/i.test(p.textContent ?? ''))).length
+    );
+    check('every query excludes the excluded organisation', rowsWithExclusion === rows, `${rowsWithExclusion}/${rows}`);
     check('query rows render the whole query as pills (no clipped textarea)', (await page.locator('[role="dialog"] [data-query-row] textarea').count()) === 0 && (await page.locator('[role="dialog"] [data-query-row] [title="Operator"]').count()) >= rows);
     check('query modal shows one editable row per approved query', rows >= 8 && rows <= 16, `${rows} rows`);
     check('query modal has depth control', await page.getByText('Depth').isVisible());
@@ -221,8 +242,16 @@ async function shot(page: Page, name: string) {
     };
     await repo.recordSearchRun(createdSessionId!, user.id, fixture, 50);
 
+    const storedConstraints = (await prisma.job.findUnique({ where: { id: createdSessionId! }, select: { mergedConstraints: true } }))?.mergedConstraints as any;
+    check('organisation constraint persisted with the session', storedConstraints?.target_organizations?.[0] === 'Acme' && storedConstraints?.organization_scope === 'current' && storedConstraints?.excluded_organizations?.[0] === 'Infosys', JSON.stringify({ t: storedConstraints?.target_organizations, s: storedConstraints?.organization_scope, x: storedConstraints?.excluded_organizations }));
+    const priyaRow = await prisma.candidate.findFirst({ where: { jobId: createdSessionId!, name: 'Priya Nair' }, select: { matchBreakdown: true, rawScrapedData: true, missingSignals: true } });
+    const rahulRow = await prisma.candidate.findFirst({ where: { jobId: createdSessionId!, name: 'Rahul Verma' }, select: { matchBreakdown: true, rawScrapedData: true, missingSignals: true } });
+    check('title "… - Acme | LinkedIn" scores as current-employer match (10/10)', (priyaRow?.matchBreakdown as any)?.organization_score === 10 && (priyaRow?.rawScrapedData as any)?.organization_match === 'Acme', JSON.stringify((priyaRow?.matchBreakdown as any)?.organization_score));
+    check('profile without the organisation scores 0 and is flagged', (rahulRow?.matchBreakdown as any)?.organization_score === 0 && JSON.stringify(rahulRow?.missingSignals).includes('required organisations'), JSON.stringify(rahulRow?.missingSignals));
+
     await page.reload({ waitUntil: 'networkidle' });
     await page.getByText('Priya Nair').first().waitFor({ timeout: 15000 });
+    check('card shows the matched organisation chip only where found', (await page.locator('.card', { hasText: 'Priya Nair' }).first().locator('[data-org-match="Acme"]').count()) === 1 && (await page.locator('.card', { hasText: 'Rahul Verma' }).first().locator('[data-org-match]').count()) === 0);
     const cards = await page.getByRole('button', { name: 'Shortlist' }).count();
     check('reopened session renders stored candidates as cards', cards === 3, `${cards} cards`);
     check('score distribution + platform charts render', (await page.getByText(/Score distribution/).count()) === 1 && (await page.getByText(/Profiles per platform/).count()) === 1);

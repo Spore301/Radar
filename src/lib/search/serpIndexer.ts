@@ -331,12 +331,13 @@ export function indexSerpResult(
   const seniority = detectSeniority(headline || result.title);
   const years = detectExperienceYears(result.snippet);
 
-  const { overall_score, match_breakdown, match_rationale, missing_signals } = calculateRelevanceScore(
+  const { overall_score, match_breakdown, match_rationale, missing_signals, organization_match } = calculateRelevanceScore(
     skills,
     seniority,
     location,
     headline,
-    constraints
+    constraints,
+    { title: result.title, snippet: result.snippet }
   );
 
   // Rough sense of how much the SERP actually told us about this person.
@@ -366,8 +367,10 @@ export function indexSerpResult(
     match_breakdown,
     match_rationale,
     missing_signals,
+    organization_match,
     data_completeness: Math.min(1, Math.round(completeness * 100) / 100),
     raw_scraped_data: {
+      organization_match,
       serp_title: result.title,
       serp_position: result.position ?? null,
       canonical_url: canonical,
