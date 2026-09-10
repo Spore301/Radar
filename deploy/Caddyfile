@@ -8,15 +8,24 @@
 {$SITE_ADDRESS} {
 	encode zstd gzip
 
-	# Long cache for Next's hashed build assets and the hero media.
-	@static path /_next/static/* /hero/* /brand/*
-	header @static Cache-Control "public, max-age=31536000, immutable"
-
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
 		-Server
 	}
 
-	reverse_proxy app:3000
+	# Long cache for Next's hashed build assets and the hero media. Set on the
+	# response coming back from the app (header_down), which replaces Next's
+	# own Cache-Control. A plain `header` here would run before the proxy and
+	# leave two Cache-Control headers on the response.
+	@static path /_next/static/* /hero/* /brand/*
+	handle @static {
+		reverse_proxy app:3000 {
+			header_down Cache-Control "public, max-age=31536000, immutable"
+		}
+	}
+
+	handle {
+		reverse_proxy app:3000
+	}
 }

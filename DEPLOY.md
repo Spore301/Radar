@@ -170,6 +170,7 @@ Fill in every line:
 | `SITE_ADDRESS` | Your hostname, e.g. `radr.houseofedtech.in` (no `https://`). |
 | `AUTH_SECRET` | The random string from `openssl rand -base64 32`. |
 | `AUTH_TRUST_HOST` | `true` |
+| `AUTH_URL` | `https://` plus your hostname, e.g. `https://radr.houseofedtech.in`. Without it, Google sign-in fails with a redirect mismatch, because the app cannot see its public address from behind the proxy. |
 | `AUTH_GOOGLE_ID` | Client ID from Part 6. |
 | `AUTH_GOOGLE_SECRET` | Client secret from Part 6. |
 | `ALLOWED_GOOGLE_DOMAIN` | Your Workspace domain, e.g. `houseofedtech.in`, so every colleague can sign in. Leave empty to allow only invited emails (Part 8). |
