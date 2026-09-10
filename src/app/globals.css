@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 /* ---------------------------------------------------------------------------
-   CandidateRadar on the Vercel / Geist design language.
+   RADR. on the Vercel / Geist design language.
    Near-black ink on a near-white canvas; 1px hairline defines every object;
    6px radius for anything you press, 12px for anything you read; weight is
    600 for headings, 500 for buttons and labels, 400 for everything else.
@@ -175,4 +175,227 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in, .animate-slide-left, .animate-slide-right, .animate-indeterminate { animation: none !important; }
   .animate-indeterminate { left: 0; width: 40%; }
+}
+
+/* ---------------------------------------------------------------------------
+   Landing page (the public front door at /).
+   The hero follows the Figma handoff: a 1532-wide canvas, 180px side margins,
+   a Geist Mono headline in pure black, a full-bleed video washed to white by
+   four gradient layers. Everything below the hero is the Geist system
+   (ink on canvas, hairlines, 12px cards) carrying the hero's mono voice.
+   --------------------------------------------------------------------------- */
+.landing {
+  background: #ffffff;
+  color: var(--ink);
+}
+.lp-container {
+  width: 100%;
+  max-width: 1172px;
+  margin-inline: auto;
+  padding-inline: 24px;
+}
+@media (min-width: 768px) {
+  .lp-container { padding-inline: 40px; }
+}
+@media (min-width: 1252px) {
+  /* 1172 + 2 x 40: from here the container is exactly the Figma content width. */
+  .lp-container { padding-inline: 0; }
+}
+
+/* Mono headline: lowercase regular, UPPERCASE 600, 100% line-height. */
+.lp-h {
+  font-family: var(--font-geist-mono), 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+.lp-h strong { font-weight: 600; }
+.lp-h-hero {
+  /* 40px on the 1532 canvas; scales down to 28px on phones. */
+  font-size: clamp(28px, 2.61vw, 40px);
+  color: #000000;
+}
+.lp-h-section { font-size: clamp(26px, 2.1vw, 32px); }
+.lp-h-cta { font-size: clamp(28px, 2.61vw, 40px); }
+
+/* Buttons: Geist Mono 14, 1px black border, 6px chrome radius. */
+.lp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 30px;
+  font-family: var(--font-geist-mono), 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  white-space: nowrap;
+  border-radius: 6px;
+  border: 1px solid #000000;
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.lp-btn-primary { background: #000000; color: #ffffff; }
+.lp-btn-primary:hover { background: #262626; border-color: #262626; }
+.lp-btn-secondary { background: transparent; color: #000000; }
+.lp-btn-secondary:hover { background: var(--hairline-soft); }
+.lp-btn strong { font-weight: 700; }
+
+/* Hero geometry. 984 tall on the 1532 canvas (64.23vw), never below 720. */
+.lp-hero {
+  position: relative;
+  overflow: hidden;
+  background: #ffffff;
+  height: clamp(720px, 64.23vw, 984px);
+}
+/* Video region: 880 / 984 of the hero. */
+.lp-hero-media {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 89.43%;
+  will-change: transform;
+}
+.lp-hero-media video,
+.lp-hero-media img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+/* Top, left and right white fades over the video region. */
+.lp-hero-edges {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 89.43%;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.92) 28%, rgba(255, 255, 255, 0.55) 50%, rgba(255, 255, 255, 0) 70.4%),
+    linear-gradient(to right, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.7) 12%, rgba(255, 255, 255, 0) 32%),
+    linear-gradient(to left, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.7) 12%, rgba(255, 255, 255, 0) 32%);
+}
+/* Independent bottom wash: y 620 to 984 of the canvas, overlapping the video by 260. */
+.lp-hero-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 63%;
+  height: 37%;
+  pointer-events: none;
+  /* Solid white by 64% of this layer (~86.7% of the hero), i.e. above the
+     video's bottom edge at 89.43%, so that edge can never show through. */
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.75) 42%, rgba(255, 255, 255, 1) 64%, rgba(255, 255, 255, 1) 100%);
+}
+.lp-hero-content {
+  position: relative;
+  z-index: 10;
+}
+
+/* Sections start hidden only once motion has been confirmed on the client;
+   without JavaScript everything is simply visible. */
+.landing.has-motion [data-reveal],
+.landing.has-motion [data-reveal-item] {
+  opacity: 0;
+}
+
+/* Walkthrough index */
+.lp-step-link {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0 10px 16px;
+  color: var(--mute);
+  transition: color 200ms ease;
+}
+.lp-step-link::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--ink);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 250ms ease;
+}
+.lp-step-link.is-active { color: var(--ink); }
+.lp-step-link.is-active::before { transform: scaleY(1); }
+
+/* Ink-on-white schematics inside the walkthrough */
+.lp-schematic {
+  position: relative;
+  background: var(--elevated);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.lp-schematic-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas);
+}
+.lp-schematic-grid {
+  background-image:
+    linear-gradient(to right, var(--hairline-soft) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--hairline-soft) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.lp-token {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--elevated);
+  font-family: var(--font-geist-mono), 'Geist Mono', ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.lp-token-op { background: var(--ink); color: #fff; border-color: var(--ink); }
+.lp-token-bool { background: var(--hairline-soft); color: var(--body); }
+.lp-token-not { color: var(--error); border-color: transparent; padding: 0 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .landing.has-motion [data-reveal],
+  .landing.has-motion [data-reveal-item] { opacity: 1; }
+  .lp-step-link, .lp-step-link::before { transition: none; }
+}
+
+/* Closing band: the cloud image sits behind the CTA and footer, white at the
+   top so it emerges only toward the foot of the page. */
+.lp-clouds {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -12%;
+  height: 112%;
+  pointer-events: none;
+  will-change: transform;
+}
+.lp-clouds-fade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 1) 0%,
+    rgba(255, 255, 255, 0.97) 28%,
+    rgba(255, 255, 255, 0.8) 60%,
+    rgba(255, 255, 255, 0.45) 100%
+  );
 }

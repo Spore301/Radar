@@ -2,7 +2,8 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, Check, Loader2, Radar } from 'lucide-react';
+import { ArrowRight, Check, Loader2 } from 'lucide-react';
+import { RadrLogo } from '@/components/brand/RadrLogo';
 
 // ---------------------------------------------------------------------------
 // Three questions, one screen at a time: who you are, which organisation your
@@ -81,11 +82,8 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
     <div className="min-h-screen bg-canvas flex items-center justify-center px-4">
       <div className="w-full max-w-[520px] flex flex-col gap-5">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="w-6 h-6 rounded-[5px] bg-ink text-white flex items-center justify-center">
-              <Radar className="w-3.5 h-3.5" strokeWidth={2.5} />
-            </span>
-            <span className="text-label-sm">CandidateRadar</span>
+          <div className="flex items-center text-ink">
+            <RadrLogo height={18} />
           </div>
           <span className="text-body-xs text-mute tabular-nums">
             Step {index + 1} of {ORDER.length}

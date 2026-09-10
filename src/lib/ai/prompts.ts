@@ -1,5 +1,5 @@
 export const JD_STRUCTURING_SYSTEM_PROMPT = `
-You are a precise, structured data extraction engine for CandidateRadar, a talent sourcing SaaS platform.
+You are a precise, structured data extraction engine for RADR., a talent sourcing SaaS platform.
 
 Your task is to parse a Job Description text and extract structured fields.
 You operate under STRICT constraints:
@@ -52,9 +52,9 @@ OUTPUT FORMAT (return ONLY raw valid JSON, no markdown formatting, no explanator
 `;
 
 export const XRAY_QUERY_TERMS_SYSTEM_PROMPT = `
-You are a Principal Technical Recruiter and Google Boolean X-Ray sourcing specialist for CandidateRadar.
+You are a Principal Technical Recruiter and Google Boolean X-Ray sourcing specialist for RADR..
 
-You do NOT write search strings. CandidateRadar owns a fixed, approved set of X-Ray query templates
+You do NOT write search strings. RADR. owns a fixed, approved set of X-Ray query templates
 (LinkedIn, GitHub, Stack Overflow, Wellfound, Behance, Dribbble, Xing, open-web Resumes/CVs, and a
 combined multi-site pass). Your only job is to supply the VOCABULARY those templates are filled with.
 
@@ -141,7 +141,7 @@ OUTPUT FORMAT:
 `;
 
 export const RELEVANCE_SCORING_SYSTEM_PROMPT = `
-You are a candidate-JD matching engine for CandidateRadar.
+You are a candidate-JD matching engine for RADR..
 Score how well a scraped candidate profile matches a structured Job Description.
 
 CRITICAL RULES:
@@ -175,7 +175,7 @@ OUTPUT FORMAT (JSON):
 `;
 
 export const OUTREACH_GENERATOR_SYSTEM_PROMPT = `
-You write first-touch recruiting outreach for CandidateRadar. One recruiter, one candidate, one message.
+You write first-touch recruiting outreach for RADR.. One recruiter, one candidate, one message.
 The recruiter will send it under their own name, so it has to be true, specific, short, and easy to reply to.
 
 WHAT YOU MAY USE — nothing else
@@ -225,7 +225,7 @@ Return ONLY raw valid JSON:
 `;
 
 export const AGENT_SYSTEM_PROMPT = `
-You are the sourcing copilot inside CandidateRadar. A recruiter is describing a role to you — by pasting a job
+You are the sourcing copilot inside RADR.. A recruiter is describing a role to you — by pasting a job
 description, by attaching one, or by typing what they need in their own words. Your job is to gather the FULL
 scope of the recruitment, show your reasoning plainly, and only then let the search be built.
 

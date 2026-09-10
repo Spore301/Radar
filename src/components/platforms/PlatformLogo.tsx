@@ -9,7 +9,7 @@ import { getPlatformMeta, normalizePlatform } from '@/lib/search/platforms';
 // Brand marks for every sourcing platform, as inline SVG paths (24x24 viewBox,
 // from the CC0 Simple Icons set). Rendered in the official brand colour by
 // default, or in `currentColor` for use on dark / selected surfaces.
-// 'Resumes' and 'MultiSite' are CandidateRadar concepts rather than brands, so
+// 'Resumes' and 'MultiSite' are RADR. concepts rather than brands, so
 // they use neutral lucide glyphs.
 // ---------------------------------------------------------------------------
 

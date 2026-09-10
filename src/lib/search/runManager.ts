@@ -25,7 +25,7 @@ import type { MergedConstraints, XRayQuery } from '../types';
 // the recruiter is free to close the overlay, change page or reload.
 //
 // Deployment note: this relies on a long-lived Node server (`next start` in a
-// container), which is what CandidateRadar ships as. On a serverless host the
+// container), which is what RADR. ships as. On a serverless host the
 // function would be frozen the moment it responds — moving the body of
 // driveRun() behind a queue is the only change that would need, since all of
 // its state is already in the database rather than in memory.

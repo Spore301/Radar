@@ -12,7 +12,7 @@ const VARIABLES = ['candidate_name', 'role_title', 'company_name', 'top_skills']
 const PREVIEW = {
   candidate_name: 'Aanya Verma',
   role_title: 'Senior Product Designer',
-  company_name: 'CandidateRadar',
+  company_name: 'RADR.',
   top_skills: 'Figma, Design Systems, User Research',
 };
 

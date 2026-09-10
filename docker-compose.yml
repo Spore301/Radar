@@ -1,0 +1,43 @@
+# RADR. on one host: the Next.js app plus Caddy for TLS and routing.
+#
+#   docker compose up -d --build     first start / after code changes
+#   docker compose logs -f app       follow the app log
+#   docker compose down              stop (data volumes are kept)
+#
+# Compose reads ./.env for both the app's environment (env_file) and for the
+# ${SITE_ADDRESS} substitution below.
+services:
+  app:
+    build: .
+    image: radar-app:latest
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      # The database lives on the app-data volume; do not override in .env.
+      DATABASE_URL: file:/data/radar.db
+    volumes:
+      - app-data:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env, e.g. radr.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:

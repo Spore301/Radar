@@ -68,7 +68,11 @@ async function shot(page: Page, name: string) {
     const anon = await browser.newContext();
     const anonPage = await anon.newPage();
     const landing = await anonPage.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
-    check('landing page at / for anonymous visitors', landing?.status() === 200 && (await anonPage.getByRole('link', { name: /Continue with Google/ }).count()) === 1, anonPage.url());
+    check(
+      'landing page at / for anonymous visitors',
+      landing?.status() === 200 && (await anonPage.getByRole('link', { name: /Find Your Next Hire/ }).count()) >= 1,
+      anonPage.url(),
+    );
     await anonPage.screenshot({ path: `${SHOTS}/00-landing.png` });
     const resp = await anonPage.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
     check('unauthenticated /dashboard redirects to /signin', anonPage.url().includes('/signin'), `${resp?.status()} → ${anonPage.url()}`);
@@ -82,7 +86,7 @@ async function shot(page: Page, name: string) {
     await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
     check('signed-in visitor at / lands on /dashboard', page.url() === `${BASE}/dashboard`, page.url());
     check('sidebar shows the organisation from onboarding', await page.getByText('QA Org').first().isVisible());
-    check('sidebar brand visible', await page.getByText('CandidateRadar', { exact: true }).first().isVisible());
+    check('sidebar brand visible', await page.getByRole('img', { name: 'RADR.' }).first().isVisible());
     check('no announcement bar / footer marketing', (await page.getByText(/SaaS v1\.0|Grounded AI|Ethical Sourcing/i).count()) === 0);
     check('user shown in sidebar', await page.getByText('QA Runner').first().isVisible());
     check('agent entry in sidebar', (await page.getByRole('link', { name: 'Agent' }).count()) === 1);

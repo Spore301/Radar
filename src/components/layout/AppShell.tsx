@@ -4,8 +4,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
-import { Search, History, Users, FileText, Settings, LogOut, Radar, Sparkles, type LucideIcon } from 'lucide-react';
+import { Search, History, Users, FileText, Settings, LogOut, Sparkles, type LucideIcon } from 'lucide-react';
 import { Avatar } from '@/components/ui/Avatar';
+import { RadrLogo } from '@/components/brand/RadrLogo';
 import { HistoryPanel } from '@/components/sessions/HistoryPanel';
 import { RunTrackerProvider } from '@/components/runs/RunTracker';
 import { RunToaster } from '@/components/runs/RunToaster';
@@ -90,11 +91,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         aria-label="Primary"
       >
         <div className="px-3 pt-4 pb-3 flex items-center justify-between lg:justify-start">
-          <Link href="/dashboard" className="flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-hairline-soft transition-colors">
-            <span className="w-5 h-5 rounded-[4px] bg-ink text-white flex items-center justify-center">
-              <Radar className="w-3 h-3" strokeWidth={2.5} />
-            </span>
-            <span className="text-label-sm text-ink">CandidateRadar</span>
+          <Link href="/dashboard" className="flex items-center px-2 py-1.5 rounded-sm text-ink hover:bg-hairline-soft transition-colors" aria-label="RADR. home">
+            <RadrLogo height={16} />
           </Link>
         </div>
 

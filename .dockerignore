@@ -1,0 +1,26 @@
+node_modules
+.next
+.next-qa
+.next-handoff
+out
+build
+.git
+.github
+.env
+.env.*
+!.env.production.example
+prisma/*.db
+prisma/*.db-journal
+prisma/*.db-wal
+prisma/*.db-shm
+uploads
+scripts/.e2e-shots
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+.vercel
+# Source assets that are not served (the served copies live in public/)
+RADR. (2000 x 1000 px)
+Radar_screen_rotating_animation_*.mp4
+*.md
+!README.md

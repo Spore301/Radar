@@ -5,7 +5,7 @@ import { SessionProvider } from 'next-auth/react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'CandidateRadar',
+  title: 'RADR.',
   description:
     'Parse a job description, run approved X-Ray queries across LinkedIn, GitHub, Stack Overflow, Wellfound, Behance, Dribbble, Xing and the open web, index every profile returned, and track outreach.',
 };

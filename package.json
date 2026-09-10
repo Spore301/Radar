@@ -1,5 +1,5 @@
 {
-  "name": "candidate-radar",
+  "name": "radr",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -19,6 +19,7 @@
     "clsx": "^2.1.1",
     "framer-motion": "^11.15.0",
     "geist": "^1.7.2",
+    "gsap": "^3.15.0",
     "lucide-react": "^0.469.0",
     "mammoth": "^1.9.0",
     "next": "^14.2.23",
