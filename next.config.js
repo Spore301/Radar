@@ -15,22 +15,16 @@ const nextConfig = {
   },
   webpack: (config, { isServer }) => {
     if (isServer) {
-      // `playwright` is an *optional* dependency, and the production image
-      // installs with `npm ci --omit=optional` (see Dockerfile) because the
-      // headless-browser SERP fallback is not used in production — recruiters
-      // supply a SerpAPI key instead. Without this, webpack still tries to
-      // resolve the lazy `await import('playwright')` in
-      // src/lib/search/playwrightSearch.ts while building the module graph and
-      // fails with "Module not found: Can't resolve 'playwright'", even though
-      // that import never executes at build time. `serverComponentsExternalPackages`
-      // above is not enough on its own, since Next still resolves those
-      // packages on disk to trace them for the standalone output.
-      //
-      // Marking them external leaves the import as a runtime require. When the
-      // package is absent it throws exactly where both callers already catch it
-      // (playwrightSearch.ts logs and returns no results; serp.ts records the
-      // message), so a search degrades to `provider: 'none'` rather than
-      // breaking the build.
+      // `playwright` is an *optional* dependency: the headless-browser SERP
+      // fallback is not used in production, where recruiters supply a SerpAPI
+      // key, and the production image ships no browser (see Dockerfile).
+      // Marking it external keeps the lazy `await import('playwright')` in
+      // src/lib/search/playwrightSearch.ts out of the bundle and out of the
+      // standalone trace, so its presence or absence at build time never
+      // matters. At runtime the require either works (dev, with a browser) or
+      // throws exactly where both callers already catch it (playwrightSearch.ts
+      // logs and returns no results; serp.ts records the message), and a search
+      // degrades to `provider: 'none'`.
       config.externals = [...(config.externals ?? []), 'playwright', 'playwright-core'];
     }
     return config;

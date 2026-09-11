@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
-import { Search, History, Users, FileText, Settings, LogOut, Sparkles, type LucideIcon } from 'lucide-react';
+import { Search, History, Users, FileText, Settings, LogOut, Sparkles, Bug, type LucideIcon } from 'lucide-react';
 import { Avatar } from '@/components/ui/Avatar';
 import { RadrLogo } from '@/components/brand/RadrLogo';
 import { HistoryPanel } from '@/components/sessions/HistoryPanel';
@@ -26,6 +26,7 @@ const NAV = [
   { label: 'Pipeline', href: '/dashboard/pipeline', icon: Users },
   { label: 'Templates', href: '/dashboard/templates', icon: FileText },
   { label: 'Settings', href: '/dashboard/settings', icon: Settings },
+  { label: 'Feedback', href: '/dashboard/feedback', icon: Bug },
 ] as const;
 
 export const SIDEBAR_WIDTH = 232;

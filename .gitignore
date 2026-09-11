@@ -23,6 +23,7 @@ next-env.d.ts
 /prisma/*.db-journal
 /prisma/*.db-wal
 /prisma/*.db-shm
+/prisma/*.db.bak*
 
 # candidate / JD documents — may contain third-party personal data
 /uploads/

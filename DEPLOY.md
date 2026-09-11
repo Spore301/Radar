@@ -174,6 +174,7 @@ Fill in every line:
 | `AUTH_GOOGLE_ID` | Client ID from Part 6. |
 | `AUTH_GOOGLE_SECRET` | Client secret from Part 6. |
 | `ALLOWED_GOOGLE_DOMAIN` | Your Workspace domain, e.g. `houseofedtech.in`, so every colleague can sign in. Leave empty to allow only invited emails (Part 8). |
+| `ADMIN_EMAILS` | Comma-separated emails of the people running the test. They can read every tester's feedback report on the Feedback page and mark it resolved. Leave empty for nobody. |
 | `DEEPSEEK_API_KEY` | Your DeepSeek key. |
 | `SERPAPI_KEY` | Optional. Recruiters add their own key during onboarding. |
 

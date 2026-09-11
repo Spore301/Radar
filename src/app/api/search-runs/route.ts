@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
   if (!constraints || !Array.isArray(queries) || queries.length === 0) {
     return NextResponse.json({ error: 'Missing constraints or query bundle parameters' }, { status: 400 });
   }
-  if (!(await getSession(jobId))) {
+  if (!(await getSession(jobId, session!.user.id))) {
     return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   }
 

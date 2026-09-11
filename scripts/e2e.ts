@@ -10,6 +10,7 @@
  */
 import path from 'node:path';
 import { chromium, type Page } from 'playwright';
+import sharp from 'sharp';
 import { initDb, prisma } from '../src/lib/db/client';
 import * as repo from '../src/lib/db/sessions';
 import { setProviderKey } from '../src/lib/credentials';
@@ -231,7 +232,7 @@ async function shot(page: Page, name: string) {
     await shot(page, '06-results-empty');
 
     // --- seed fixture candidates via the repository (fallback engine indexes 0) ---
-    const detail = await repo.getSession(createdSessionId!);
+    const detail = await repo.getSession(createdSessionId!, user.id);
     const q = detail!.job.query_bundle[0];
     const c = detail!.job.merged_constraints;
     const mk = (title: string, url: string, snippet: string) => indexSerpResult({ title, url, snippet }, q, c, createdSessionId!)!;
@@ -360,7 +361,12 @@ async function shot(page: Page, name: string) {
     const channelSelect = noteModal.getByLabel('Channel');
     check('LinkedIn profile defaults to a connection note', (await channelSelect.inputValue()) === 'LinkedIn Note', await channelSelect.inputValue());
     check('channel list offers the connection note with its cap', (await channelSelect.locator('option', { hasText: /connection note · 300 chars/ }).count()) === 1);
-    await noteModal.getByText('Drafting…').waitFor({ state: 'detached', timeout: 90000 }).catch(() => {});
+    // Wait for the draft itself, not for the "Drafting…" indicator to go away:
+    // that indicator renders a tick after the modal opens, so "detached" can be
+    // satisfied before it ever appears and the textarea is read while still
+    // empty. The source chip is only rendered once a draft has been set. The
+    // route allows two 45 s model attempts, hence the generous budget.
+    await noteModal.getByText(/AI draft|Template/).first().waitFor({ timeout: 120000 });
     const noteText = await noteModal.locator('textarea').inputValue();
     const counted = Number(await noteModal.locator('[data-char-count]').getAttribute('data-char-count'));
     check('drafted note is within 300 characters', noteText.length > 0 && noteText.length <= 300 && counted === noteText.length, `${noteText.length} chars`);
@@ -446,6 +452,59 @@ async function shot(page: Page, name: string) {
     check("another user's run list does not leak this user's runs", Array.isArray(idorList.runs) && idorList.runs.length === 0, `${idorList.runs?.length} runs`);
     const ownGet = await page.request.get(`${BASE}/api/search-runs/${ownRun!.id}`);
     check('the owner can still read their own run', ownGet.status() === 200, `status ${ownGet.status()}`);
+
+    // --- another user cannot see this user's sessions or candidates (cross-account isolation) ---
+    const otherSessions = await (await fp.request.get(`${BASE}/api/sessions`)).json();
+    check("another user's history does not list this user's session", Array.isArray(otherSessions.sessions) && !otherSessions.sessions.some((x: any) => x.id === createdSessionId), `${otherSessions.sessions?.length} sessions visible`);
+    const otherDetail = await fp.request.get(`${BASE}/api/sessions/${createdSessionId}`);
+    check("another user's read of this user's session is 404", otherDetail.status() === 404, `status ${otherDetail.status()}`);
+    const otherPatch = await fp.request.patch(`${BASE}/api/sessions/${createdSessionId}`, { data: { title: 'hijacked' } });
+    check("another user cannot rename this user's session", otherPatch.status() === 404, `status ${otherPatch.status()}`);
+    const titleStill = await prisma.job.findUnique({ where: { id: createdSessionId! }, select: { title: true } });
+    check('the session title was not changed by the other user', titleStill?.title !== 'hijacked', titleStill?.title);
+    const otherCands = await (await fp.request.get(`${BASE}/api/candidates?jobId=${createdSessionId}`)).json();
+    check("another user's candidate list for this session is empty", Array.isArray(otherCands.candidates) && otherCands.candidates.length === 0, `${otherCands.candidates?.length} candidates`);
+    const ownCandidate = await prisma.candidate.findFirst({ where: { jobId: createdSessionId! }, select: { id: true, status: true } });
+    const otherCandPatch = await fp.request.patch(`${BASE}/api/candidates/${ownCandidate!.id}`, { data: { notes: 'hijacked' } });
+    check("another user cannot edit this user's candidate", otherCandPatch.status() === 404, `status ${otherCandPatch.status()}`);
+    const otherOutreach = await fp.request.post(`${BASE}/api/candidates/${ownCandidate!.id}/outreach`, { data: { channel: 'LinkedIn DM', message: 'hijacked' } });
+    check("another user cannot log outreach on this user's candidate", otherOutreach.status() === 404, `status ${otherOutreach.status()}`);
+    const otherDelete = await fp.request.delete(`${BASE}/api/sessions/${createdSessionId}`);
+    check("another user cannot delete this user's session", otherDelete.status() === 404 && (await prisma.job.count({ where: { id: createdSessionId! } })) === 1, `status ${otherDelete.status()}`);
+    const ownList = await (await page.request.get(`${BASE}/api/sessions`)).json();
+    check('the owner still sees their own session in history', ownList.sessions.some((x: any) => x.id === createdSessionId));
+
+    // --- feedback: a report with a screenshot, compressed on the server, private to its reporter ---
+    const bigPng = await sharp({ create: { width: 2400, height: 1500, channels: 3, background: '#dfe7f5' } })
+      .composite([{ input: Buffer.from(`<svg width="2400" height="1500"><text x="80" y="200" font-size="120" fill="#171717">RADR. bug report ${Date.now()}</text><rect x="80" y="400" width="2200" height="900" fill="none" stroke="#171717" stroke-width="12"/></svg>`), top: 0, left: 0 }])
+      .png().toBuffer();
+    const fbPost = await page.request.post(`${BASE}/api/feedback`, {
+      multipart: {
+        kind: 'bug',
+        message: 'QA: the receipt table overlaps the sidebar on narrow windows.',
+        page_url: 'Results page',
+        images: { name: 'shot.png', mimeType: 'image/png', buffer: bigPng },
+      },
+    });
+    const fb = (await fbPost.json()).feedback;
+    check('feedback report is created (201)', fbPost.status() === 201 && typeof fb?.id === 'string', `status ${fbPost.status()}`);
+    const img = fb?.images?.[0];
+    check('screenshot was downscaled to at most 1600px', img && img.width <= 1600 && img.height <= 1600, `${img?.width}x${img?.height}`);
+    check('screenshot was compressed smaller than the upload', img && img.bytes < img.original_bytes && img.original_bytes === bigPng.length, `${img?.original_bytes} -> ${img?.bytes} bytes`);
+    const imgGet = await page.request.get(`${BASE}/api/feedback/${fb.id}/images/${img.id}`);
+    check('reporter can fetch the stored image as WebP', imgGet.status() === 200 && (imgGet.headers()['content-type'] ?? '').includes('image/webp'), imgGet.headers()['content-type']);
+    const imgOther = await fp.request.get(`${BASE}/api/feedback/${fb.id}/images/${img.id}`);
+    check("another user cannot fetch this user's screenshot", imgOther.status() === 404, `status ${imgOther.status()}`);
+    const fbOther = await (await fp.request.get(`${BASE}/api/feedback?scope=all`)).json();
+    check("another (non-admin) user's feedback list excludes this report even with scope=all", fbOther.scope === 'mine' && !fbOther.feedback.some((x: any) => x.id === fb.id), `scope=${fbOther.scope}, ${fbOther.feedback?.length} reports`);
+    const fbOtherPatch = await fp.request.patch(`${BASE}/api/feedback/${fb.id}`, { data: { status: 'resolved' } });
+    check('a non-admin cannot resolve a report', fbOtherPatch.status() === 404, `status ${fbOtherPatch.status()}`);
+    await page.goto(`${BASE}/dashboard/feedback`, { waitUntil: 'networkidle' });
+    check('feedback page renders with the report', await page.getByRole('heading', { name: 'Feedback' }).isVisible() && await page.getByText('receipt table overlaps the sidebar').isVisible());
+    check('feedback entry in sidebar', (await page.getByRole('link', { name: 'Feedback' }).count()) === 1);
+    await shot(page, '14b-feedback');
+    const fbDelete = await page.request.delete(`${BASE}/api/feedback/${fb.id}`);
+    check('reporter can delete their own report (images cascade)', fbDelete.status() === 200 && (await prisma.feedbackImage.count({ where: { feedbackId: fb.id } })) === 0, `status ${fbDelete.status()}`);
 
     await freshCtx.close();
     await prisma.session.deleteMany({ where: { userId: fresh.id } });

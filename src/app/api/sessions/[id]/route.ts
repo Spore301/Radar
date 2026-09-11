@@ -9,17 +9,17 @@ type Params = { params: { id: string } };
 
 /** GET /api/sessions/:id — everything needed to reopen a session where it was left. */
 export async function GET(_req: NextRequest, { params }: Params) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
 
-  const detail = await getSession(params.id);
+  const detail = await getSession(params.id, session!.user.id);
   if (!detail) return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   return NextResponse.json({ success: true, ...detail });
 }
 
 /** PATCH /api/sessions/:id — save edited constraints / query bundle / title / status. */
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
 
   let body: any;
@@ -29,7 +29,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'Request body must be JSON.' }, { status: 400 });
   }
 
-  const patch: Parameters<typeof updateSession>[1] = {};
+  const patch: Parameters<typeof updateSession>[2] = {};
   if (typeof body.title === 'string') patch.title = body.title;
   if (body.merged_constraints) {
     patch.merged_constraints = {
@@ -44,17 +44,17 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   if (body.keyword_map) patch.keyword_map = body.keyword_map;
   if (['draft', 'parsing', 'searching', 'complete', 'archived'].includes(body.status)) patch.status = body.status;
 
-  const job = await updateSession(params.id, patch);
+  const job = await updateSession(params.id, session!.user.id, patch);
   if (!job) return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   return NextResponse.json({ success: true, session: job });
 }
 
 /** DELETE /api/sessions/:id — removes the session and, by cascade, its runs, candidates and outreach logs. */
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
 
-  const ok = await deleteSession(params.id);
+  const ok = await deleteSession(params.id, session!.user.id);
   if (!ok) return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   return NextResponse.json({ success: true });
 }

@@ -165,6 +165,61 @@ model User {
   credentials   ProviderCredential[]
   creditPeriods CreditPeriod[]
   ledgerEntries CreditLedger[]
+
+  feedback Feedback[]
+}
+
+// ---------------------------------------------------------------------------
+// Tester feedback: a bug report / idea with optional screenshots. Images are
+// stored inline as WebP after server-side compression (src/lib/feedback/images.ts),
+// so a backup of the database carries the reports and their pictures together.
+// Visible to the reporter and to admins (ADMIN_EMAILS); see src/lib/session.ts.
+// ---------------------------------------------------------------------------
+
+enum FeedbackKind {
+  bug
+  idea
+  other
+}
+
+enum FeedbackStatus {
+  open
+  resolved
+}
+
+model Feedback {
+  id         String         @id @default(cuid())
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind       FeedbackKind   @default(bug)
+  status     FeedbackStatus @default(open)
+  message    String
+  /** Where it happened, as the reporter described it or the page they were on. */
+  pageUrl    String?
+  userAgent  String?
+  createdAt  DateTime       @default(now())
+  resolvedAt DateTime?
+
+  images FeedbackImage[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model FeedbackImage {
+  id            String   @id @default(cuid())
+  feedbackId    String
+  feedback      Feedback @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+  mimeType      String
+  width         Int
+  height        Int
+  bytes         Int
+  originalBytes Int
+  originalName  String?
+  data          Bytes
+  createdAt     DateTime @default(now())
+
+  @@index([feedbackId])
 }
 
 model Account {
@@ -232,8 +287,10 @@ model Job {
   agentTranscript   Json?
   status            JobStatus @default(draft)
   candidateCount    Int       @default(0)
-  // Authorship, not access control — every signed-in user sees every job
-  // regardless of who created it (see the plan's "shared workspace" note).
+  // Ownership AND access control: the session repository (src/lib/db/sessions.ts)
+  // filters every read and write on createdById, so users only ever see their
+  // own sessions, candidates and outreach. Nullable only for legacy rows,
+  // which are therefore visible to nobody.
   createdById       String?
   createdBy         User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
   createdAt         DateTime  @default(now())

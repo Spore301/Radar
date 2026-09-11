@@ -21,3 +21,18 @@ export async function requireSession() {
   }
   return { session, unauthorized: null as null };
 }
+
+/**
+ * Admins are the people running the test: they can read every tester's
+ * feedback and mark it resolved. Configured with ADMIN_EMAILS, a comma-
+ * separated list, on the server. Nobody is an admin by default. This grants
+ * nothing else — sessions and candidates stay strictly per user.
+ */
+export function isAdminEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const list = (process.env.ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return list.includes(email.trim().toLowerCase());
+}

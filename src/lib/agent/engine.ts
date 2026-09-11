@@ -288,7 +288,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
   let transcript: AgentMessage[] = [];
   let rawJd = '';
   if (sessionId) {
-    const detail = await getSession(sessionId);
+    const detail = await getSession(sessionId, userId);
     if (!detail) throw new Error('Session not found.');
     prev = { ...EMPTY, ...detail.job.merged_constraints };
     transcript = (detail.agent_transcript ?? []) as AgentMessage[];
@@ -429,7 +429,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
     });
     sessionId = job.id;
   } else {
-    await updateSession(sessionId, { merged_constraints: constraints, ...(queries.length ? { query_bundle: queries } : {}), title });
+    await updateSession(sessionId, userId, { merged_constraints: constraints, ...(queries.length ? { query_bundle: queries } : {}), title });
     if (jdText) await prisma.job.update({ where: { id: sessionId }, data: { rawJdText: jdText } });
   }
   await prisma.job.update({ where: { id: sessionId }, data: { agentTranscript: JSON.parse(JSON.stringify({ messages: nextTranscript, state: nextState })) } });

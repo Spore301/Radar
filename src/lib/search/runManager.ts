@@ -53,7 +53,7 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
 
   // Persist what is about to run first, so the receipt and the bundle agree
   // even if the process dies one line later.
-  await updateSession(input.jobId, {
+  await updateSession(input.jobId, input.userId, {
     merged_constraints: input.constraints,
     query_bundle: input.queries,
     status: 'searching',
@@ -71,7 +71,7 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
     // Starting must be all-or-nothing. Without this the session is left
     // 'searching' forever with no run row behind it — nothing to poll, no
     // progress popup, and a UI stuck mid-flight until someone edits the row.
-    await updateSession(input.jobId, { status: before?.status ?? 'draft' }).catch(() => {});
+    await updateSession(input.jobId, input.userId, { status: before?.status ?? 'draft' }).catch(() => {});
     throw err;
   }
 

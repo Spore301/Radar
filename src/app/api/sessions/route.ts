@@ -5,11 +5,11 @@ import { sanitizeSelectedPlatforms } from '@/lib/ai/client';
 
 export const dynamic = 'force-dynamic';
 
-/** GET /api/sessions — the history sidebar: every stored JD-to-leads session, newest first. */
+/** GET /api/sessions — the history sidebar: the caller's own sessions, newest first. */
 export async function GET() {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
-  const sessions = await listSessions();
+  const sessions = await listSessions(session!.user.id);
   return NextResponse.json({ success: true, sessions });
 }
 

@@ -8,9 +8,9 @@ export const dynamic = 'force-dynamic';
 
 /** GET /api/candidates/:id/outreach — the candidate's outreach history, newest first. */
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
-  const logs = await listOutreachLogs(params.id);
+  const logs = await listOutreachLogs(params.id, session!.user.id);
   return NextResponse.json({ success: true, logs });
 }
 

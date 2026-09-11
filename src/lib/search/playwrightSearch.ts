@@ -5,11 +5,10 @@ import type { RawSearchResult, SerpProvider } from './serp';
 //
 // Typed locally, not via `import type { Browser } from 'playwright'`, so the
 // type-checker never needs the package on disk. `playwright` is an *optional*
-// dependency and is deliberately absent from the production image (the
-// Dockerfile installs with `--omit=optional`); with the real import the
-// production build failed at `next build`'s type-check step with "Cannot find
-// module 'playwright'". Keep these interfaces to exactly the members used
-// below so they stay trivially compatible with the real types.
+// dependency, so it may be absent wherever the build runs; with the real
+// import the production build once failed at `next build`'s type-check step
+// with "Cannot find module 'playwright'". Keep these interfaces to exactly the
+// members used below so they stay trivially compatible with the real types.
 // ---------------------------------------------------------------------------
 interface HeadlessPage {
   goto(url: string, options?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit'; timeout?: number }): Promise<unknown>;

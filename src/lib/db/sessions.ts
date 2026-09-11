@@ -33,8 +33,12 @@ import { defaultFollowUpDays, isAtLeast } from '../pipeline/stages';
 // nothing: constraints, the query bundle, every indexed profile, the
 // per-query receipt of the last run, and every shortlist / outreach edit.
 //
-// Access model follows the schema's "authorship, not access control" note:
-// every signed-in teammate sees every session; createdBy is attribution.
+// Access model: a session belongs to the user who created it. Every read and
+// write below takes the caller's user id and filters on Job.createdById, so a
+// row another user owns is indistinguishable from one that does not exist
+// (404, never 403 — nothing confirms the id is real). Candidates and outreach
+// logs inherit the owner through their Job. Testing is cross-organisation at
+// the user level; per-company sharing would layer on top of this later.
 // ---------------------------------------------------------------------------
 
 /** Prisma Json columns reject `undefined` inside objects; round-tripping strips them. */
@@ -81,9 +85,10 @@ export async function createSession(userId: string | null, input: NewSessionInpu
   return toJob(row);
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
+/** The caller's own sessions, newest first — the history sidebar. */
+export async function listSessions(userId: string): Promise<SessionSummary[]> {
   const jobs = await prisma.job.findMany({
-    where: { status: { not: 'archived' } },
+    where: { status: { not: 'archived' }, createdById: userId },
     orderBy: { updatedAt: 'desc' },
     include: {
       createdBy: { select: { name: true, email: true } },
@@ -132,8 +137,8 @@ export interface SessionDetail {
   last_run: { id: string; started_at: string; finished_at: string | null; stats: SearchStats; query_results: QueryRunResult[] } | null;
 }
 
-export async function getSession(id: string): Promise<SessionDetail | null> {
-  const row = await prisma.job.findUnique({ where: { id } });
+export async function getSession(id: string, userId: string): Promise<SessionDetail | null> {
+  const row = await prisma.job.findFirst({ where: { id, createdById: userId } });
   if (!row) return null;
 
   const [candidateRows, lastRun] = await Promise.all([
@@ -200,8 +205,8 @@ export interface SessionPatch {
   status?: Job['status'];
 }
 
-export async function updateSession(id: string, patch: SessionPatch): Promise<Job | null> {
-  const exists = await prisma.job.findUnique({ where: { id }, select: { id: true, title: true, mergedConstraints: true } });
+export async function updateSession(id: string, userId: string, patch: SessionPatch): Promise<Job | null> {
+  const exists = await prisma.job.findFirst({ where: { id, createdById: userId }, select: { id: true, title: true, mergedConstraints: true } });
   if (!exists) return null;
 
   // A title the recruiter (or the demo) set explicitly is kept. Only a title we
@@ -227,8 +232,8 @@ export async function updateSession(id: string, patch: SessionPatch): Promise<Jo
 }
 
 /** Hard delete: cascades to runs, candidates and outreach logs via the schema. */
-export async function deleteSession(id: string): Promise<boolean> {
-  const exists = await prisma.job.findUnique({ where: { id }, select: { id: true } });
+export async function deleteSession(id: string, userId: string): Promise<boolean> {
+  const exists = await prisma.job.findFirst({ where: { id, createdById: userId }, select: { id: true } });
   if (!exists) return false;
   await prisma.job.delete({ where: { id } });
   return true;
@@ -370,8 +375,9 @@ export interface CandidatePatch {
   tags?: string[];
 }
 
-export async function updateCandidate(id: string, userId: string | null, patch: CandidatePatch): Promise<CandidateProfile | null> {
-  const exists = await prisma.candidate.findUnique({ where: { id }, select: { id: true, status: true } });
+export async function updateCandidate(id: string, userId: string, patch: CandidatePatch): Promise<CandidateProfile | null> {
+  // Ownership is inherited from the session the candidate was found in.
+  const exists = await prisma.candidate.findFirst({ where: { id, job: { createdById: userId } }, select: { id: true, status: true } });
   if (!exists) return null;
   // Stage age is measured from the last real change, not from every edit.
   const stageChanged = Boolean(patch.status && patch.status !== exists.status);
@@ -417,12 +423,15 @@ export async function updateCandidate(id: string, userId: string | null, patch: 
  */
 export async function logOutreach(
   candidateId: string,
-  userId: string | null,
+  userId: string,
   channel: OutreachChannel,
   messageBody: string,
   templateId?: string
 ): Promise<CandidateProfile | null> {
-  const exists = await prisma.candidate.findUnique({ where: { id: candidateId }, select: { id: true, status: true, nextFollowUp: true } });
+  const exists = await prisma.candidate.findFirst({
+    where: { id: candidateId, job: { createdById: userId } },
+    select: { id: true, status: true, nextFollowUp: true },
+  });
   if (!exists) return null;
 
   const now = new Date();
@@ -456,9 +465,9 @@ export async function logOutreach(
 }
 
 /** Every outreach logged against a candidate, newest first — the drawer's activity timeline. */
-export async function listOutreachLogs(candidateId: string): Promise<OutreachLog[]> {
+export async function listOutreachLogs(candidateId: string, userId: string): Promise<OutreachLog[]> {
   const rows = await prisma.outreachLog.findMany({
-    where: { candidateId },
+    where: { candidateId, candidate: { job: { createdById: userId } } },
     orderBy: { sentAt: 'desc' },
     include: { sentBy: { select: { name: true, email: true } } },
   });
@@ -480,10 +489,11 @@ export interface CandidateListFilter {
   statuses?: CandidateStatus[];
 }
 
-/** Cross-session candidate listing for the pipeline board, tagged with the session title. */
-export async function listCandidates(filter: CandidateListFilter = {}): Promise<CandidateProfile[]> {
+/** The caller's candidates across their sessions, for the pipeline board, tagged with the session title. */
+export async function listCandidates(userId: string, filter: CandidateListFilter = {}): Promise<CandidateProfile[]> {
   const rows = await prisma.candidate.findMany({
     where: {
+      job: { createdById: userId },
       ...(filter.jobId ? { jobId: filter.jobId } : {}),
       ...(filter.statuses && filter.statuses.length ? { status: { in: filter.statuses } } : {}),
     },

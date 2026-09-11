@@ -9,11 +9,11 @@ const STATUSES: CandidateStatus[] = ['New', 'Reviewed', 'Saved', 'Contacted', 'R
 
 /**
  * GET /api/candidates?jobId=&status=Shortlisted,Contacted
- * Cross-session listing for the pipeline board. Each candidate carries the
- * title of the session that found them.
+ * The caller's candidates across their own sessions, for the pipeline board.
+ * Each candidate carries the title of the session that found them.
  */
 export async function GET(req: NextRequest) {
-  const { unauthorized } = await requireSession();
+  const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
 
   const url = new URL(req.url);
@@ -23,6 +23,6 @@ export async function GET(req: NextRequest) {
     .map((s) => s.trim())
     .filter((s): s is CandidateStatus => STATUSES.includes(s as CandidateStatus));
 
-  const candidates = await listCandidates({ jobId, statuses });
+  const candidates = await listCandidates(session!.user.id, { jobId, statuses });
   return NextResponse.json({ success: true, candidates });
 }

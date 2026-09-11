@@ -2,7 +2,8 @@
 # ---------------------------------------------------------------------------
 # RADR. / CandidateRadar production image.
 #
-#   deps     install exact dependencies (Playwright is optional and skipped)
+#   deps     install exact dependencies (sharp's native binaries are optional
+#            deps, so optionals are installed; Playwright's browser download is skipped)
 #   builder  next build with output: 'standalone'
 #   runner   slim runtime: the standalone server, static assets, and just
 #            enough of Prisma to run `migrate deploy` at container start.
@@ -18,7 +19,13 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 # `postinstall` runs `prisma generate`, so the schema must be present first.
 COPY prisma ./prisma
-RUN npm ci --omit=optional
+# Optional dependencies ARE installed: sharp (feedback screenshot compression)
+# ships libvips as optional platform packages (@img/sharp-linux-x64, ...).
+# Playwright is optional too; only its small npm package lands here — the
+# 400 MB browser download is skipped, and next.config.js marks it external so
+# it never enters the standalone bundle. The runtime image has no browser.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN npm ci
 
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
