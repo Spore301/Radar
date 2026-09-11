@@ -95,8 +95,12 @@ GROUNDING RULES — follow every one:
      organisation from <ORGANIZATIONS> in required_phrases or exclude_terms, and do not add organisations
      of your own — if the details name a company that <ORGANIZATIONS> lacks, still leave it out; the
      recruiter controls that list.
-   - Anything else to avoid (agencies, freelancers, students, interns, a technology, a location) goes into
-     exclude_terms: 0 to 6 single words or short phrases.
+   - exclude_terms holds ONLY things the recruiter explicitly asked to avoid in <ADDITIONAL_DETAILS>
+     (e.g. they wrote "no agencies or freelancers" → ["agency", "freelancer"]): 0 to 6 single words or
+     short phrases. If the details name nothing to avoid, exclude_terms MUST be []. NEVER add exclusions
+     of your own — not interns, students, freelancers, recruiters, juniors, competitors or a technology —
+     however sensible they seem for the role: every term here is negated in every query and silently
+     removes real candidates. Exclusions the recruiter did not write are discarded.
    - Location nuance ("must be in Bengaluru proper", "EU only") refines location_terms and geo_tld.
    Never contradict the details; if they conflict with the JD fields, the details win.
 10. Google ignores words past the 32nd, so prefer FEWER, more specific terms over many broad ones.

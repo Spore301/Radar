@@ -153,7 +153,9 @@ Excluded: ${baseTerms.excluded_orgs.length ? baseTerms.excluded_orgs.join(', ') 
 </ORGANIZATIONS>`;
 
   const aiTerms = await callDeepSeekAPI<Partial<QueryTerms>>(userPrompt, XRAY_QUERY_TERMS_SYSTEM_PROMPT, apiKey);
-  const terms = mergeQueryTerms(baseTerms, aiTerms);
+  // The details text is passed so model exclusions can be checked against what
+  // the recruiter actually wrote; the model may not invent -terms of its own.
+  const terms = mergeQueryTerms(baseTerms, aiTerms, constraints.additional_details ?? constraints.soft_constraints);
   return buildQueryBundle(terms, platforms);
 }
 

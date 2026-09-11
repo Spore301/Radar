@@ -810,15 +810,47 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
 }
 
 /**
+ * Is `term` something the recruiter actually wrote? Every word of the term
+ * must share a stem with a word in the details (≥4 common leading characters),
+ * so "freelance" is grounded by "freelancers", "intern" by "interns" or
+ * "internships", "agency" by "agencies" — but nothing is grounded by an empty
+ * or unrelated box. Used to stop the model volunteering exclusions.
+ */
+function isGroundedIn(term: string, details: string): boolean {
+  const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').split(' ').filter(Boolean);
+  const pool = words(details);
+  if (!pool.length) return false;
+  return words(term).every((w) =>
+    pool.some((d) => {
+      const n = Math.min(w.length, d.length);
+      return n >= 4 ? w.slice(0, n) === d.slice(0, n) : w === d;
+    })
+  );
+}
+
+/**
  * Merges AI-supplied vocabulary over the heuristic one. Anything missing,
  * empty or malformed falls back to the grounded heuristic value, and skill
  * lists are pinned to the recruiter-confirmed must-haves so the model can't
  * add requirements the JD never had.
+ *
+ * `details` is the recruiter's additional-details text. Exclusions are the
+ * one field where the model must not contribute anything of its own: every
+ * -term is negated in every query, and an invented `-intern` or `-freelance`
+ * silently removes real candidates from roles that never asked for it. So a
+ * model exclusion survives only if it is grounded in what the recruiter wrote;
+ * with no details at all, none survive.
  */
-export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null | undefined): QueryTerms {
+export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null | undefined, details: string | null | undefined = ''): QueryTerms {
   if (!ai || typeof ai !== 'object') return base;
   const strList = (v: unknown, max: number): string[] | null =>
     Array.isArray(v) ? uniq(v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)).slice(0, max) : null;
+  const detailsText = (details ?? '').trim();
+  // Grounded in the recruiter's words, and not a respelling of an exclusion
+  // the heuristic parser already has ("freelance" next to "freelancers").
+  const aiExclusions = (strList(ai.exclude_terms, 6) ?? []).filter(
+    (t) => isGroundedIn(t, detailsText) && !base.exclude_terms.some((b) => isGroundedIn(t, b) || isGroundedIn(b, t))
+  );
 
   const synonyms: Record<string, string[]> = { ...base.skill_synonyms };
   if (ai.skill_synonyms && typeof ai.skill_synonyms === 'object') {
@@ -847,7 +879,9 @@ export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null
     // Recruiter intent from the additional details is additive: what the
     // heuristic parser found stays, the model can only sharpen or extend it.
     required_phrases: uniq([...(strList(ai.required_phrases, 3) ?? []), ...base.required_phrases]).slice(0, 3),
-    exclude_terms: uniq([...base.exclude_terms, ...(strList(ai.exclude_terms, 6) ?? [])]).slice(0, 6),
+    // Heuristic exclusions (parsed from the details) always stay; model
+    // exclusions only if grounded in the same details — see isGroundedIn.
+    exclude_terms: uniq([...base.exclude_terms, ...aiExclusions]).slice(0, 6),
     // Organisations are a hard constraint the recruiter typed; the model is
     // told about them but cannot add, drop or rename one.
     target_orgs: base.target_orgs,
