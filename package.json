@@ -4,10 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint --dir src",
-    "postinstall": "prisma generate",
+    "postinstall": "node -e \"if (require('fs').existsSync('prisma/schema.prisma')) require('child_process').execSync('npx prisma generate', {stdio: 'inherit'})\"",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
