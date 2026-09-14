@@ -4,6 +4,7 @@
 [package]
 name = "spore301/radar"
 version = "0.1.0"
+private = true
 description = "CandidateRadar Next.js App on Wasmer Edge"
 
 [[app]]
@@ -16,5 +17,4 @@ port = 3000
 NODE_ENV = "production"
 PORT = "3000"
 HOSTNAME = "0.0.0.0"
-DATABASE_URL = "file:/data/radar.db"
 AUTH_TRUST_HOST = "true"
