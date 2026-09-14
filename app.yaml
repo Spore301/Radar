@@ -1,0 +1,5 @@
+kind: wasmer.io/App.v0
+name: radar
+owner: spore301
+package: .
+app_id: da_KE4I8tXUZalA
