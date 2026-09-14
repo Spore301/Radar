@@ -32,28 +32,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async signIn({ user, account, profile }) {
       if (account?.provider !== 'google') return false;
 
-      // The `hd` (hosted-domain) claim comes from Google's verified ID token
-      // and asserts which Google Workspace domain the account belongs to.
-      // Deliberately not using `email.endsWith(domain)`: that's a check on a
-      // user-controlled-looking string field where an anchoring mistake (e.g.
-      // `.includes` instead of `.endsWith`, or matching without the leading
-      // `@`) is an easy way to accidentally admit "evil-houseofedtech.in.co".
-      // `hd` has no such footgun — it's either the exact verified domain or
-      // absent (personal Gmail accounts don't have one at all).
       const googleProfile = profile as GoogleProfile | undefined;
       const hd = googleProfile?.hd;
 
-      if (ALLOWED_GOOGLE_DOMAIN && hd === ALLOWED_GOOGLE_DOMAIN) {
-        return true;
+      // If ALLOWED_GOOGLE_DOMAIN is set, restrict to that domain (with invite exceptions)
+      if (ALLOWED_GOOGLE_DOMAIN) {
+        if (hd === ALLOWED_GOOGLE_DOMAIN) return true;
+        const email = (user.email ?? googleProfile?.email)?.toLowerCase();
+        if (email) {
+          const invite = await prisma.invite.findUnique({ where: { email } });
+          if (invite) return true;
+        }
+        return false;
       }
 
-      const email = (user.email ?? googleProfile?.email)?.toLowerCase();
-      if (!email) return false;
-
-      const invite = await prisma.invite.findUnique({ where: { email } });
-      if (!invite) return false;
-
-      await prisma.invite.update({ where: { email }, data: { usedAt: new Date() } });
+      // Allow anyone with a valid Google account to sign in
       return true;
     },
     async session({ session, user }) {
