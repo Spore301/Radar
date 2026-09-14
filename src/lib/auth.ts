@@ -21,9 +21,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   providers: [
     Google({
-      // Pre-filters the Google account chooser to this domain. Cosmetic only
-      // — a user can still pick a different account, so this is never the
-      // actual security boundary; the signIn callback below is.
+      clientId: process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.AUTH_GOOGLE_SECRET || process.env.GOOGLE_CLIENT_SECRET,
       authorization: ALLOWED_GOOGLE_DOMAIN
         ? { params: { hd: ALLOWED_GOOGLE_DOMAIN } }
         : undefined,
