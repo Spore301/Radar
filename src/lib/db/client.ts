@@ -9,7 +9,10 @@ const globalForPrisma = globalThis as unknown as {
 function createPrismaClient(): PrismaClient {
   const connectionString = process.env.DATABASE_URL;
   if (connectionString && (connectionString.startsWith('postgres://') || connectionString.startsWith('postgresql://'))) {
-    const pool = new Pool({ connectionString });
+    const pool = new Pool({
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+    });
     const adapter = new PrismaPg(pool);
     return new PrismaClient({
       adapter,
