@@ -2,7 +2,7 @@
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ChevronDown, Check, AlertTriangle, Minus } from 'lucide-react';
+import { ChevronDown, Check, AlertTriangle, Minus, Download } from 'lucide-react';
 
 import { FileUploadZone } from '@/components/ingestion/FileUploadZone';
 import { ConstraintsForm } from '@/components/ingestion/ConstraintsForm';
@@ -21,7 +21,7 @@ import { StructuredJD, MergedConstraints, XRayQuery, KeywordMap, CandidateProfil
 import { INITIAL_DEMO_JOB } from '@/lib/seedData';
 import { generateQueryBundleForConstraints } from '@/lib/ai/client';
 import type { QueryRunResult, SearchStats } from '@/lib/search/x-raySearchService';
-import { getTemplate } from '@/lib/search/xrayTemplates';
+import { queryLabel } from '@/lib/search/xrayTemplates';
 import { platformLabel, PLATFORMS } from '@/lib/search/platforms';
 import { scoreTier, TIER_BG, TIER_LABEL } from '@/lib/utils/tier';
 import * as api from '@/lib/api/sessions';
@@ -365,7 +365,7 @@ function SourcingDashboard() {
       items: queriesToRun.map((q) => ({
         id: q.id,
         platform: q.platform,
-        label: getTemplate(q.query_type)?.label ?? 'Custom query',
+        label: queryLabel(q.query_type),
         state: 'active',
         meta: 'queued',
       })),
@@ -561,6 +561,16 @@ function SourcingDashboard() {
             </button>
           ) : (
             <>
+              {candidates.length > 0 && (
+                <a
+                  href={`/api/sessions/${encodeURIComponent(sessionId)}/export`}
+                  download
+                  className="btn-ghost"
+                  title="Download every lead from this search as a CSV (opens in Sheets, Excel or an ATS import)"
+                >
+                  <Download className="w-3.5 h-3.5" /> Export CSV · {candidates.length}
+                </a>
+              )}
               {structuredJD && step !== 'constraints' && (
                 <button type="button" onClick={() => setStep('constraints')} className="btn-ghost">
                   Edit constraints
@@ -693,7 +703,7 @@ function SourcingDashboard() {
                           <td>
                             <PlatformBadge platform={r.platform} />
                           </td>
-                          <td className="text-ink whitespace-nowrap">{getTemplate(r.queryType)?.label ?? 'Custom'}</td>
+                          <td className="text-ink whitespace-nowrap">{queryLabel(r.queryType)}</td>
                           <td className="max-w-[360px]">
                             <code className="font-mono text-body-xs text-mute block truncate" title={r.queryString}>
                               {r.queryString}

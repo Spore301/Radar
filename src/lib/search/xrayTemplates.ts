@@ -214,7 +214,7 @@ export function orgClause(t: QueryTerms, platform: CandidatePlatform): string {
 // the preview. Google itself is indifferent to operator order.
 const LEADING_OPERATOR = /^(\((?:site|filetype):\S+(?:\s+OR\s+(?:site|filetype):\S+)*\)|(?:site|filetype):\S+)\s*/;
 
-function withOrgClause(query: string, t: QueryTerms, platform: CandidatePlatform): string {
+export function withOrgClause(query: string, t: QueryTerms, platform: CandidatePlatform): string {
   const clause = orgClause(t, platform);
   if (!clause) return query;
   const m = query.match(LEADING_OPERATOR);
@@ -297,7 +297,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     platform: 'LinkedIn',
     label: 'Broad profile search',
     pattern:
-      'site:linkedin.com/in/ ({role synonyms, OR\'d}) AND ({must-have skills}) {location} -intitle:job -intitle:hiring -intitle:recruiter',
+      'site:linkedin.com/in/ ({role synonyms, OR\'d}) AND ({must-have skills}) {location} -intitle:job -intitle:jobs -intitle:hiring -intitle:recruiter',
     expected_result_type: 'Profile',
     intent: (t) => `Broad LinkedIn sweep for ${t.role_synonyms[0] ?? 'the role'} profiles with the must-have skills.`,
     build: (t) =>
@@ -307,7 +307,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
         topicClause(t),
         requiredClause(t),
         locationClause(t),
-        '-intitle:job -intitle:hiring -intitle:recruiter',
+        '-intitle:job -intitle:jobs -intitle:hiring -intitle:recruiter',
         excludeClause(t)
       ),
   },
@@ -315,7 +315,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'linkedin_title',
     platform: 'LinkedIn',
     label: 'Title-anchored (narrow)',
-    pattern: 'site:linkedin.com/in/ intitle:({role synonyms}) AND ({must-have skills}) -intitle:job -intitle:hiring -intitle:recruiter',
+    pattern: 'site:linkedin.com/in/ intitle:({role synonyms}) AND ({must-have skills}) {location} -intitle:job -intitle:jobs -intitle:hiring -intitle:recruiter',
     expected_result_type: 'Profile',
     intent: (t) => `LinkedIn profiles whose headline carries the ${t.role_synonyms[0] ?? 'role'} title.`,
     build: (t) =>
@@ -324,7 +324,8 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
         `intitle:${baseRolesClause(t)}`,
         topicClause(t),
         requiredClause(t),
-        '-intitle:job -intitle:hiring -intitle:recruiter',
+        locationClause(t),
+        '-intitle:job -intitle:jobs -intitle:hiring -intitle:recruiter',
         excludeClause(t)
       ),
   },
@@ -332,7 +333,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'linkedin_proximity',
     platform: 'LinkedIn',
     label: 'Proximity-filtered',
-    pattern: 'site:linkedin.com/in/ {seniority term} AROUND(5) ({role synonyms}) AND ({must-have skills})',
+    pattern: 'site:linkedin.com/in/ {seniority term} AROUND(5) ({role synonyms}) AND ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: (t) => `LinkedIn profiles where "${t.seniority_term}" sits within five words of the role title.`,
     build: (t) =>
@@ -342,18 +343,10 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
             `${quote(t.seniority_term)} AROUND(5) ${baseRolesClause(t)}`,
             topicClause(t),
             requiredClause(t),
+            locationClause(t),
             excludeClause(t)
           )
         : null,
-  },
-  {
-    id: 'linkedin_pdf',
-    platform: 'LinkedIn',
-    label: 'Resume / CV subpath',
-    pattern: 'site:linkedin.com/in/ ({role synonyms}) filetype:pdf',
-    expected_result_type: 'Resume',
-    intent: (t) => `PDF resumes exported from LinkedIn profiles for ${t.role_synonyms[0] ?? 'the role'}.`,
-    build: (t) => join('site:linkedin.com/in/', rolesClause(t), requiredClause(t), 'filetype:pdf', excludeClause(t)),
   },
 
   // GitHub -------------------------------------------------------------------
@@ -461,7 +454,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     expected_result_type: 'Profile',
     intent: (t) => `Country-domain (${t.geo_tld || 'none for this location'}) pages mentioning the role and skills.`,
     build: (t) =>
-      t.geo_tld ? join(`site:${t.geo_tld}`, rolesClause(t), topicClause(t), requiredClause(t), excludeClause(t)) : null,
+      t.geo_tld && t.geo_tld !== '.com' ? join(`site:${t.geo_tld}`, rolesClause(t), topicClause(t), requiredClause(t), excludeClause(t)) : null,
   },
 
   // Resumes / CVs (open web) -------------------------------------------------
@@ -527,6 +520,18 @@ export const MAX_TEMPLATES_ON_ONE_PLATFORM = Math.max(...PLATFORM_IDS.map((id) =
 
 export function getTemplate(id: string): XRayTemplate | undefined {
   return XRAY_TEMPLATES.find((t) => t.id === id);
+}
+
+/** query_type of a query the AI planner wrote (see src/lib/search/plannedQueries.ts). */
+export type PlannedTier = 'precision' | 'balanced' | 'recall';
+export const PLANNED_TIER_LABEL: Record<PlannedTier, string> = { precision: 'AI · Precision', balanced: 'AI · Balanced', recall: 'AI · Recall' };
+
+/** Display label for any query: the template's, the planner tier's, or "Custom query". */
+export function queryLabel(queryType: string): string {
+  const tpl = getTemplate(queryType);
+  if (tpl) return tpl.label;
+  const tier = queryType.startsWith('ai_') ? (queryType.slice(3) as PlannedTier) : null;
+  return tier && PLANNED_TIER_LABEL[tier] ? PLANNED_TIER_LABEL[tier] : 'Custom query';
 }
 
 /**
@@ -787,7 +792,8 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
   // the country domain for the geo sweep, and whether "remote" was said.
   const loc = parseLocation(constraints.location);
   const location_terms = loc.searchTerms.slice(0, 3);
-  const geo_tld = loc.tld;
+  // '.com' (the US) is not a country domain in practice — `site:.com` is the whole web.
+  const geo_tld = loc.tld === '.com' ? '' : loc.tld;
   const details = parseAdditionalDetails(constraints.additional_details ?? constraints.soft_constraints);
 
   return {
@@ -809,23 +815,31 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
   };
 }
 
+// One inflectional suffix, longest first: enough to fold "agencies"/"agency",
+// "freelancers"/"freelance", "internships"/"intern" onto one stem without
+// folding unrelated words that merely share a prefix ("intern"/"interview").
+const STEM_SUFFIXES: Array<[string, string]> = [['ships', ''], ['ship', ''], ['ies', 'y'], ['ers', ''], ['ing', ''], ['er', ''], ['es', ''], ['ed', ''], ['s', ''], ['e', '']];
+
+function stem(word: string): string {
+  for (const [suffix, replacement] of STEM_SUFFIXES) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 3) return word.slice(0, -suffix.length) + replacement;
+  }
+  return word;
+}
+
 /**
  * Is `term` something the recruiter actually wrote? Every word of the term
- * must share a stem with a word in the details (≥4 common leading characters),
- * so "freelance" is grounded by "freelancers", "intern" by "interns" or
- * "internships", "agency" by "agencies" — but nothing is grounded by an empty
- * or unrelated box. Used to stop the model volunteering exclusions.
+ * must share a stem with a word in the details, so "freelance" is grounded by
+ * "freelancers", "intern" by "interns" or "internships", "agency" by
+ * "agencies" — but "intern" is not grounded by "interview" or "international",
+ * and nothing is grounded by an empty or unrelated box. Used to stop the
+ * model volunteering exclusions.
  */
-function isGroundedIn(term: string, details: string): boolean {
+export function isGroundedIn(term: string, details: string): boolean {
   const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').split(' ').filter(Boolean);
-  const pool = words(details);
-  if (!pool.length) return false;
-  return words(term).every((w) =>
-    pool.some((d) => {
-      const n = Math.min(w.length, d.length);
-      return n >= 4 ? w.slice(0, n) === d.slice(0, n) : w === d;
-    })
-  );
+  const pool = new Set(words(details).map(stem));
+  if (!pool.size) return false;
+  return words(term).every((w) => pool.has(stem(w)));
 }
 
 /**

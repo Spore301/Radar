@@ -91,7 +91,8 @@ async function fetchSerpApiPage(
   apiKey: string,
   engine: SerpEngine,
   start: number,
-  num: number
+  num: number,
+  gl = ''
 ): Promise<SerpApiPage> {
   const params = new URLSearchParams({
     engine,
@@ -104,6 +105,8 @@ async function fetchSerpApiPage(
     // run to run; pin it off. Google's duplicate filter stays ON — the "similar"
     // results it hides are overwhelmingly low-quality duplicates, not profiles.
     safe: 'off',
+    // Search from the requisition's country so local profiles rank first.
+    ...(gl ? { gl } : {}),
   });
 
   const res = await fetch(`https://serpapi.com/search.json?${params.toString()}`, {
@@ -168,7 +171,7 @@ async function searchWithSerpApi(
 
   // Page 1. Google caps organic results at 10 per page since it dropped num=100;
   // asking for more only routes the request onto its slow path and times out.
-  const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, SERP_PAGE_SIZE);
+  const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, SERP_PAGE_SIZE, options.gl);
   const notice = first.notice;
   pages = 1;
   absorb(first.results);
@@ -180,7 +183,9 @@ async function searchWithSerpApi(
 
   // Google gave one ~10-result page: walk the rest with `start`.
   while (pages < options.maxPagesPerQuery) {
-    const page = await fetchSerpApiPage(queryString, apiKey, options.engine, pages * SERP_PAGE_SIZE, SERP_PAGE_SIZE);
+    // Under an invocation deadline, keep what we have rather than be killed mid-page.
+    if (options.stopAt && Date.now() > options.stopAt) break;
+    const page = await fetchSerpApiPage(queryString, apiKey, options.engine, pages * SERP_PAGE_SIZE, SERP_PAGE_SIZE, options.gl);
     pages++;
     const added = absorb(page.results);
     if (added === 0 || !page.hasNext) break;
@@ -202,9 +207,9 @@ export async function runSerpQuery(queryString: string, keys: SerpApiKeys = {}, 
 
   const serpKey = keys.serpapi?.trim();
   if (serpKey) {
-    // One retry after a short pause: SerpAPI's per-second rate limit and the
-    // occasional upstream timeout are transient, and a query that fails here
-    // otherwise silently contributes nothing to the run.
+    // Up to two retries after a short pause: SerpAPI's per-second rate limit
+    // and the occasional upstream timeout are transient, and a query that
+    // fails here otherwise silently contributes nothing to the run.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const paged = await searchWithSerpApi(queryString, serpKey, options);

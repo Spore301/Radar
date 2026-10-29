@@ -4,7 +4,8 @@ import { ndjsonResponse } from '@/lib/api/ndjson';
 import { runAgentTurn } from '@/lib/agent/engine';
 import { extractTextFromBuffer } from '@/lib/extractors/jdTextExtractor';
 
-export const maxDuration = 120;
+// A confirmed turn plans queries with the reasoning model.
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 const STAGES = ['read', 'extract', 'reason', 'queries', 'save'] as const;

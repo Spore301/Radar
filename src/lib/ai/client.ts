@@ -10,41 +10,83 @@ import {
 
 import {
   JD_STRUCTURING_SYSTEM_PROMPT,
-  XRAY_QUERY_TERMS_SYSTEM_PROMPT,
+  XRAY_QUERY_PLANNER_SYSTEM_PROMPT,
   KEYWORD_MAP_SYSTEM_PROMPT,
 } from './prompts';
 import { buildQueryBundle, deriveQueryTerms, mergeQueryTerms, QueryTerms } from '../search/xrayTemplates';
-import { normalizePlatform } from '../search/platforms';
+import { getPlatformMeta, normalizePlatform } from '../search/platforms';
+import { acceptPlannedQueries, PLANNED_CAP, PLANNED_MAX_TOTAL, PlannerAnalysis, PlannerOutput, PlanReport } from '../search/plannedQueries';
 import { parseLocation, detectCityInText, cityDisplay } from '../search/location';
 import { isSoftSkill } from '../search/xrayTemplates';
 
 // Helper function to safely parse JSON from AI response
 function tryParseJSON<T>(text: string): T | null {
+  const cleaned = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
   try {
-    const cleaned = text
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
     return JSON.parse(cleaned) as T;
-  } catch (e) {
-    return null;
+  } catch {
+    // A thinking model occasionally wraps the object in a sentence; take the outermost {...}.
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1)) as T;
+    } catch {
+      return null;
+    }
   }
 }
 
+// --- Models ----------------------------------------------------------------
+//
+// DeepSeek's current API serves `deepseek-v4-pro` and `deepseek-flash`; the
+// old `deepseek-chat` id is no longer documented. Two profiles:
+//   * 'reasoning' — query planning, where the model has to think about how a
+//     requisition maps onto Google operators and platforms: V4 Pro with
+//     thinking on.
+//   * 'standard'  — extraction, the agent's turn, outreach copy: V4 Pro with
+//     thinking off, for latency.
+// Both are overridable by env, and a rejected model id falls back to Flash so
+// a renamed model degrades quality instead of silently disabling the AI.
+
+export type DeepSeekProfile = 'standard' | 'reasoning';
+
+const FALLBACK_MODEL = 'deepseek-flash';
+
+function modelFor(profile: DeepSeekProfile): { model: string; thinking: boolean; effort: string } {
+  if (profile === 'reasoning') {
+    return {
+      model: process.env.DEEPSEEK_REASONING_MODEL || 'deepseek-v4-pro',
+      thinking: process.env.DEEPSEEK_REASONING_THINKING !== 'off',
+      effort: process.env.DEEPSEEK_REASONING_EFFORT || 'high',
+    };
+  }
+  return { model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro', thinking: false, effort: 'low' };
+}
+
 /**
- * DeepSeek AI API Call Handler
+ * DeepSeek AI API Call Handler. Returns the parsed JSON object from the
+ * model's answer (the chain of thought, in `reasoning_content`, is dropped).
  */
 export async function callDeepSeekAPI<T>(
   userPrompt: string,
   systemPrompt: string,
   apiKey: string,
-  options: { timeoutMs?: number; retries?: number } = {}
+  options: { timeoutMs?: number; retries?: number; profile?: DeepSeekProfile } = {}
 ): Promise<T | null> {
-  const timeoutMs = options.timeoutMs ?? 90_000;
+  const profile = options.profile ?? 'standard';
+  const cfg = modelFor(profile);
+  // Thinking takes a while; a planning call is worth waiting for.
+  const timeoutMs = options.timeoutMs ?? (cfg.thinking ? 200_000 : 90_000);
   const retries = options.retries ?? 1;
+  let model = cfg.model;
+  let jsonMode = true;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= retries + 2; attempt++) {
     try {
       const res = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
@@ -53,13 +95,14 @@ export async function callDeepSeekAPI<T>(
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: 'deepseek-chat',
+          model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.1,
-          response_format: { type: 'json_object' },
+          thinking: { type: cfg.thinking ? 'enabled' : 'disabled' },
+          ...(cfg.thinking ? { reasoning_effort: cfg.effort } : { temperature: 0.1 }),
+          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
         }),
         // A hung model call used to hold the route open until the platform
         // killed it, which surfaced to recruiters as an opaque timeout.
@@ -68,7 +111,17 @@ export async function callDeepSeekAPI<T>(
 
       if (!res.ok) {
         const errText = await res.text();
-        console.error('DeepSeek API Error:', res.status, errText);
+        console.error(`DeepSeek API Error (${model}):`, res.status, errText.slice(0, 500));
+        // An unknown / retired model id: fall back once rather than lose the AI.
+        if ((res.status === 400 || res.status === 404) && /model/i.test(errText) && model !== FALLBACK_MODEL) {
+          model = FALLBACK_MODEL;
+          continue;
+        }
+        // JSON mode not accepted alongside thinking: ask again without it (the prompt still demands JSON).
+        if (res.status === 400 && /response_format|json/i.test(errText) && jsonMode) {
+          jsonMode = false;
+          continue;
+        }
         if (res.status >= 500 && attempt < retries) continue;
         return null;
       }
@@ -78,8 +131,9 @@ export async function callDeepSeekAPI<T>(
       return tryParseJSON<T>(content);
     } catch (err: any) {
       const timedOut = /timeout|aborted/i.test(String(err?.name || err?.message));
-      console.error(`DeepSeek API exception${timedOut ? ' (timeout)' : ''}:`, err?.message || err);
-      if (attempt < retries) {
+      console.error(`DeepSeek API exception (${model})${timedOut ? ' (timeout)' : ''}:`, err?.message || err);
+      // A timed-out thinking call won't go faster on a retry.
+      if (attempt < retries && !(timedOut && cfg.thinking)) {
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
@@ -95,68 +149,131 @@ export async function callDeepSeekAPI<T>(
  */
 export function sanitizeSelectedPlatforms(
   platforms: unknown,
-  roleType: RoleType = 'Engineering'
+  roleType: RoleType = 'Engineering',
+  location = ''
 ): CandidatePlatform[] {
   const list = Array.isArray(platforms) ? platforms : [];
   const valid = list.map(normalizePlatform).filter((p): p is CandidatePlatform => p !== null);
   const unique = Array.from(new Set(valid));
-  return unique.length > 0 ? unique : defaultPlatformsForRole(roleType);
+  return unique.length > 0 ? unique : defaultPlatformsForRole(roleType, location);
 }
 
-export function defaultPlatformsForRole(roleType: RoleType): CandidatePlatform[] {
+const DACH = new Set(['Germany', 'Austria', 'Switzerland']);
+
+/**
+ * Platforms searched when the recruiter hasn't chosen. Xing is only a default
+ * for a DACH location: elsewhere it holds almost no profiles and its queries
+ * are paid-for noise. A recruiter can still pick it explicitly.
+ */
+export function defaultPlatformsForRole(roleType: RoleType, location = ''): CandidatePlatform[] {
   if (roleType === 'Engineering') return ['LinkedIn', 'GitHub', 'StackOverflow', 'Wellfound', 'MultiSite'];
   if (roleType === 'Design') return ['LinkedIn', 'Behance', 'Dribbble', 'Wellfound', 'Resumes'];
-  return ['LinkedIn', 'Wellfound', 'Xing', 'Resumes'];
+  const country = parseLocation(location).country?.name ?? '';
+  return DACH.has(country) ? ['LinkedIn', 'Wellfound', 'Xing', 'Resumes'] : ['LinkedIn', 'Wellfound', 'Resumes'];
+}
+
+export interface QueryPlan {
+  queries: XRayQuery[];
+  /** The planner's own read of the requisition; null when the bundle came from the templates alone. */
+  analysis: PlannerAnalysis | null;
+  report: PlanReport | null;
+}
+
+const PLATFORM_ANCHOR: Partial<Record<CandidatePlatform, string>> = {
+  LinkedIn: 'site:linkedin.com/in/',
+  StackOverflow: 'site:stackoverflow.com/users',
+  Xing: 'site:xing.com/profile (or a DACH country TLD such as site:.de)',
+  Resumes: 'filetype:pdf, filetype:ppt or site:slideshare.net',
+  MultiSite: '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users)',
+};
+
+/** The prompt body for the planner: the requisition, the recruiter's words, orgs, platforms and hints. */
+function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platforms: CandidatePlatform[], details: string): string {
+  const softSkills = (constraints.must_have_skills ?? []).filter((sk) => !terms.must_have_skills.includes(sk));
+  const platformLines = platforms
+    .map((p) => {
+      const meta = getPlatformMeta(p);
+      const anchor = PLATFORM_ANCHOR[p] ?? meta.hosts.map((h) => `site:${h}`).join(' or ');
+      return `- ${p} (max ${PLANNED_CAP[p]} queries): ${anchor} — ${meta.description}`;
+    })
+    .join('\n');
+  const aliases = Object.entries(terms.skill_synonyms)
+    .map(([k, v]) => `${k} → ${v.join(' / ')}`)
+    .join('; ');
+
+  return [
+    '<REQUISITION>',
+    `Job title: ${constraints.job_title}`,
+    `Role type: ${constraints.role_type}`,
+    `Seniority: ${constraints.seniority}${terms.seniority_term ? ` (headline word: "${terms.seniority_term}")` : ''}`,
+    `Experience: ${constraints.years_of_experience?.min ?? 0}–${constraints.years_of_experience?.max ?? 10} years`,
+    `Location: ${constraints.location || 'not specified'}${constraints.remote_eligible ? ' — remote eligible' : ''}`,
+    `Must-have hard skills (searchable): ${terms.must_have_skills.length ? terms.must_have_skills.join(', ') : 'none — anchor on the title and the domain'}`,
+    `Soft skills from the JD (never search terms): ${softSkills.join(', ') || 'none'}`,
+    `Nice-to-have skills (rank, never require): ${constraints.nice_to_have_skills?.length ? constraints.nice_to_have_skills.join(', ') : 'none'}`,
+    `Domain / industry: ${constraints.domain?.length ? constraints.domain.join(', ') : 'not specified'}`,
+    `Education: ${constraints.education || 'not specified'}`,
+    '</REQUISITION>',
+    '',
+    '<ADDITIONAL_DETAILS priority="highest">',
+    details || '(none provided — so there are NO exclusions beyond the job-post filter)',
+    '</ADDITIONAL_DETAILS>',
+    '',
+    '<ORGANIZATIONS>',
+    `Must show at least one of: ${terms.target_orgs.length ? terms.target_orgs.join(', ') : '(none)'}${terms.target_orgs.length ? ` — scope: ${terms.org_scope === 'current' ? 'CURRENT employer only' : 'current or past'}` : ''}`,
+    `Exclude anyone showing: ${terms.excluded_orgs.length ? terms.excluded_orgs.join(', ') : '(none)'}`,
+    '</ORGANIZATIONS>',
+    '',
+    `<PLATFORMS total_max="${PLANNED_MAX_TOTAL}">`,
+    platformLines,
+    '</PLATFORMS>',
+    '',
+    '<HINTS>',
+    `Location spellings: ${terms.location_terms.length ? terms.location_terms.join(', ') : '(none)'}`,
+    `Country TLD: ${terms.geo_tld || '(none)'}`,
+    `Exclusions already parsed from the details: ${terms.exclude_terms.length ? terms.exclude_terms.join(', ') : '(none)'}`,
+    `Required phrases already parsed from the details: ${terms.required_phrases.length ? terms.required_phrases.join(', ') : '(none)'}`,
+    `Known skill aliases: ${aliases || '(none)'}`,
+    '</HINTS>',
+  ].join('\n');
 }
 
 /**
- * Generates the X-Ray bundle. DeepSeek supplies the sourcing vocabulary
- * (title synonyms, skill spellings, adjacent terms, ...); the approved
- * templates in src/lib/search/xrayTemplates.ts decide the query shapes. The
- * model therefore cannot introduce a platform or query type outside the list,
- * and with no API key the grounded heuristic vocabulary is used instead.
+ * Plans the X-Ray bundle with the reasoning model. DeepSeek V4 Pro (thinking)
+ * analyses the requisition and writes a precision → balanced → recall ladder
+ * of queries per platform; acceptPlannedQueries() then validates every one of
+ * them against the recruiter's hard constraints before it may spend a credit,
+ * and fills any platform the model left without a usable query from the
+ * approved templates. With no key, or no usable answer, the templates alone
+ * build the bundle from the grounded heuristic vocabulary.
  */
-export async function generateQueriesWithDeepSeek(
-  constraints: MergedConstraints,
-  customApiKey?: string
-): Promise<XRayQuery[]> {
+export async function planQueries(constraints: MergedConstraints, customApiKey?: string): Promise<QueryPlan> {
   const apiKey = customApiKey || process.env.DEEPSEEK_API_KEY;
-  const platforms = sanitizeSelectedPlatforms(constraints.selected_platforms, constraints.role_type);
+  const platforms = sanitizeSelectedPlatforms(constraints.selected_platforms, constraints.role_type, constraints.location);
   const baseTerms = deriveQueryTerms(constraints);
+  const details = (constraints.additional_details ?? constraints.soft_constraints ?? '').trim();
 
-  if (!apiKey) {
-    return buildQueryBundle(baseTerms, platforms);
+  if (!apiKey) return { queries: buildQueryBundle(baseTerms, platforms), analysis: null, report: null };
+
+  console.log('Planning X-Ray queries with the reasoning model for:', constraints.job_title);
+  const out = await callDeepSeekAPI<PlannerOutput>(plannerPrompt(constraints, baseTerms, platforms, details), XRAY_QUERY_PLANNER_SYSTEM_PROMPT, apiKey, {
+    profile: 'reasoning',
+  });
+  // Model vocabulary is merged under the usual rules (exclusions must be
+  // grounded in the recruiter's words; skills and orgs stay pinned).
+  const terms = mergeQueryTerms(baseTerms, out?.vocabulary ?? null, details);
+  if (!out || !Array.isArray(out.queries) || out.queries.length === 0) {
+    return { queries: buildQueryBundle(terms, platforms), analysis: out?.analysis ?? null, report: null };
   }
 
-  console.log('Generating DeepSeek X-Ray vocabulary for:', constraints.job_title);
+  const { queries, report } = acceptPlannedQueries(out.queries, { constraints, terms, platforms, details });
+  if (report.rejected.length) console.info(`Planner: ${report.accepted} accepted, ${report.rejected.length} rejected`, report.rejected);
+  return { queries, analysis: out.analysis ?? null, report };
+}
 
-  const userPrompt = `<USER_CONSTRAINTS>
-Job Title: ${constraints.job_title}
-Role Type: ${constraints.role_type}
-Seniority: ${constraints.seniority}
-Experience Range: ${constraints.years_of_experience?.min ?? 0} to ${constraints.years_of_experience?.max ?? 10} years
-Location: ${constraints.location || 'Not specified'} (Remote Eligible: ${constraints.remote_eligible})
-Must-Have Skills (searchable): ${baseTerms.must_have_skills.length ? baseTerms.must_have_skills.join(', ') : 'None — use domain_terms to anchor the queries'}
-Soft skills from the JD (NOT search terms): ${(constraints.must_have_skills ?? []).filter((sk) => !baseTerms.must_have_skills.includes(sk)).join(', ') || 'none'}
-Nice-To-Have Skills: ${constraints.nice_to_have_skills?.length ? constraints.nice_to_have_skills.join(', ') : 'None'}
-Domain: ${constraints.domain?.length ? constraints.domain.join(', ') : 'Not specified'}
-Selected Platforms: ${platforms.join(', ')}
-</USER_CONSTRAINTS>
-
-<ADDITIONAL_DETAILS priority="highest">
-${(constraints.additional_details ?? constraints.soft_constraints ?? '').trim() || '(none provided)'}
-</ADDITIONAL_DETAILS>
-
-<ORGANIZATIONS handled_by="templates">
-Must have worked/studied at one of: ${baseTerms.target_orgs.length ? baseTerms.target_orgs.join(', ') : '(none)'}${baseTerms.target_orgs.length ? ` — scope: ${baseTerms.org_scope === 'current' ? 'current employer only' : 'current or past'}` : ''}
-Excluded: ${baseTerms.excluded_orgs.length ? baseTerms.excluded_orgs.join(', ') : '(none)'}
-</ORGANIZATIONS>`;
-
-  const aiTerms = await callDeepSeekAPI<Partial<QueryTerms>>(userPrompt, XRAY_QUERY_TERMS_SYSTEM_PROMPT, apiKey);
-  // The details text is passed so model exclusions can be checked against what
-  // the recruiter actually wrote; the model may not invent -terms of its own.
-  const terms = mergeQueryTerms(baseTerms, aiTerms, constraints.additional_details ?? constraints.soft_constraints);
-  return buildQueryBundle(terms, platforms);
+/** The bundle alone — what the routes and the agent store on the session. */
+export async function generateQueriesWithDeepSeek(constraints: MergedConstraints, customApiKey?: string): Promise<XRayQuery[]> {
+  return (await planQueries(constraints, customApiKey)).queries;
 }
 
 /**
@@ -164,7 +281,7 @@ Excluded: ${baseTerms.excluded_orgs.length ? baseTerms.excluded_orgs.join(', ') 
  * as the instant fallback when the AI route fails, and by the demo job.
  */
 export function generateQueryBundleForConstraints(constraints: MergedConstraints): XRayQuery[] {
-  const platforms = sanitizeSelectedPlatforms(constraints.selected_platforms, constraints.role_type);
+  const platforms = sanitizeSelectedPlatforms(constraints.selected_platforms, constraints.role_type, constraints.location);
   return buildQueryBundle(deriveQueryTerms(constraints), platforms);
 }
 
@@ -310,7 +427,7 @@ export function constraintsFromStructuredJD(structured: StructuredJD, jdText: st
     nice_to_have_skills: niceToHave,
     domain: structured.domain,
     education: structured.education ?? '',
-    selected_platforms: defaultPlatformsForRole(roleType),
+    selected_platforms: defaultPlatformsForRole(roleType, parsed.display),
     additional_details: '',
     // A JD that names backgrounds ("ex-McKinsey", "from FAANG") means the
     // history, not the current employer — so the scope starts at 'any'.
@@ -381,8 +498,11 @@ export async function parseJDWithAI(
       const structured = mergeStructured(ai, heuristic.structured_jd);
       const merged_constraints = constraintsFromStructuredJD(structured, jdText);
 
-      onStage?.('queries', 'Asking DeepSeek for sourcing vocabulary and filling the approved X-Ray templates…');
-      const query_bundle = await generateQueriesWithDeepSeek(merged_constraints, apiKey);
+      // Only a draft: the recruiter confirms the constraints next, and that is
+      // when the reasoning model plans the real bundle (/api/generate-queries).
+      // Planning here as well would pay for the thinking model twice.
+      onStage?.('queries', 'Drafting X-Ray queries from the extracted constraints…');
+      const query_bundle = generateQueryBundleForConstraints(merged_constraints);
 
       onStage?.('keywords', 'Building the keyword map (title variants, synonyms, negatives)…');
       const keywordResult = await callDeepSeekAPI<KeywordMap>(`<STRUCTURED_JD>\n${JSON.stringify(structured)}\n</STRUCTURED_JD>`, KEYWORD_MAP_SYSTEM_PROMPT, apiKey);

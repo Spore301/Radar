@@ -59,9 +59,9 @@ export interface XRaySearchResult {
 }
 
 /** How many SERP calls are in flight at once. SerpAPI tolerates this comfortably; headless Google does not want more. */
-const SERP_CONCURRENCY = 3;
+export const SERP_CONCURRENCY = 3;
 
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -81,7 +81,7 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T,
  * spellings to canonical ids. Reported back as 'skipped' so the run receipt
  * shows what was not searched and why.
  */
-function sanitizeQueries(queries: XRayQuery[]): { runnable: XRayQuery[]; skipped: QueryRunResult[] } {
+export function sanitizeQueries(queries: XRayQuery[]): { runnable: XRayQuery[]; skipped: QueryRunResult[] } {
   const runnable: XRayQuery[] = [];
   const skipped: QueryRunResult[] = [];
   for (const q of queries) {
@@ -106,6 +106,66 @@ function sanitizeQueries(queries: XRayQuery[]): { runnable: XRayQuery[]; skipped
     runnable.push({ ...q, platform, query_string: queryString, query_type: q.query_type || 'custom' });
   }
   return { runnable, skipped };
+}
+
+/**
+ * Searches ONE query and indexes its results. The building block of both the
+ * in-memory executeXRaySearch below and the resumable background worker
+ * (runManager.ts), which persists each query's candidates as it lands so a
+ * worker that is frozen or killed mid-run loses at most the query in flight.
+ * Never throws: a failure is reported as a 'failed' outcome.
+ */
+export async function searchOneQuery(
+  q: XRayQuery,
+  constraints: MergedConstraints,
+  jobId: string,
+  keys: SerpApiKeys,
+  serpOptions?: SerpOptions
+): Promise<{ outcome: QueryRunResult; candidates: CandidateProfile[] }> {
+  try {
+    const serp = await runSerpQuery(q.query_string, keys, serpOptions);
+    const candidates: CandidateProfile[] = [];
+    for (const res of serp.results) {
+      const cand = indexSerpResult(res, q, constraints, jobId);
+      if (cand) candidates.push(cand);
+    }
+    const failed = serp.provider === 'none';
+    return {
+      outcome: {
+        queryId: q.id,
+        platform: q.platform,
+        queryType: q.query_type,
+        queryString: q.query_string,
+        status: failed ? 'failed' : 'completed',
+        provider: serp.provider,
+        resultCount: serp.results.length,
+        indexedCount: candidates.length,
+        pagesFetched: serp.pagesFetched,
+        creditsUsed: serp.creditsUsed,
+        error: failed ? serp.error : undefined,
+        notice: serp.notice,
+      },
+      candidates,
+    };
+  } catch (err: any) {
+    console.error(`X-Ray query ${q.id} (${q.platform}) failed:`, err);
+    return {
+      outcome: {
+        queryId: q.id,
+        platform: q.platform,
+        queryType: q.query_type,
+        queryString: q.query_string,
+        status: 'failed',
+        provider: 'none',
+        resultCount: 0,
+        indexedCount: 0,
+        pagesFetched: 0,
+        creditsUsed: 0,
+        error: err?.message || 'Unknown search error',
+      },
+      candidates: [],
+    };
+  }
 }
 
 /** Progress hooks for the streaming search route — one call per query start / finish. */
@@ -171,50 +231,7 @@ export async function executeXRaySearch(
     }
 
     hooks?.onQueryStart?.(q, index, total);
-    try {
-      const serp = await runSerpQuery(q.query_string, keys, serpOptions);
-      const candidates: CandidateProfile[] = [];
-      for (const res of serp.results) {
-        const cand = indexSerpResult(res, q, constraints, jobId);
-        if (cand) candidates.push(cand);
-      }
-      const failed = serp.provider === 'none';
-      return finish({
-        outcome: {
-          queryId: q.id,
-          platform: q.platform,
-          queryType: q.query_type,
-          queryString: q.query_string,
-          status: failed ? 'failed' : 'completed',
-          provider: serp.provider,
-          resultCount: serp.results.length,
-          indexedCount: candidates.length,
-          pagesFetched: serp.pagesFetched,
-          creditsUsed: serp.creditsUsed,
-          error: failed ? serp.error : undefined,
-          notice: serp.notice,
-        },
-        candidates,
-      });
-    } catch (err: any) {
-      console.error(`X-Ray query ${q.id} (${q.platform}) failed:`, err);
-      return finish({
-        outcome: {
-          queryId: q.id,
-          platform: q.platform,
-          queryType: q.query_type,
-          queryString: q.query_string,
-          status: 'failed',
-          provider: 'none',
-          resultCount: 0,
-          indexedCount: 0,
-          pagesFetched: 0,
-          creditsUsed: 0,
-          error: err?.message || 'Unknown search error',
-        },
-        candidates: [],
-      });
-    }
+    return finish(await searchOneQuery(q, constraints, jobId, keys, serpOptions));
   });
 
   // Preserve bundle order in the receipt so it lines up with the query modal.

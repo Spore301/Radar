@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { MergedConstraints, XRayQuery } from '@/lib/types';
 import { Trash2, Plus, X, Pencil, Check } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { QueryTokenView } from '@/components/queries/QueryTokenView';
 import { QueryBuilder } from '@/components/queries/QueryBuilder';
-import { getTemplate, countGoogleWords, GOOGLE_WORD_LIMIT } from '@/lib/search/xrayTemplates';
+import { getTemplate, queryLabel, countGoogleWords, GOOGLE_WORD_LIMIT } from '@/lib/search/xrayTemplates';
+import { validateBundle } from '@/lib/search/queryValidation';
 import { DEFAULT_MAX_PAGES_PER_QUERY, HARD_MAX_PAGES_PER_QUERY, SERP_PAGE_SIZE } from '@/lib/search/serpConfig';
 
 interface QueryPreviewModalProps {
@@ -36,6 +37,16 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, onClose, editingId]);
 
+  // The same gate the server applies before a credit is spent: a query that
+  // fails it is skipped by the run, so say so here, before Run is pressed.
+  const checks = useMemo(() => {
+    const byId = new Map<string, string[]>();
+    validateBundle(queries, (constraints ?? {}) as MergedConstraints).forEach((v) => {
+      if (!v.ok) byId.set(v.queryId, v.issues.filter((i) => i.severity === 'error').map((i) => i.message));
+    });
+    return byId;
+  }, [queries, constraints]);
+
   if (!isOpen) return null;
 
   const update = (id: string, query_string: string) => setQueries((prev) => prev.map((q) => (q.id === id ? { ...q, query_string, is_edited: true } : q)));
@@ -57,7 +68,8 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
     setEditingId(id);
   };
 
-  const maxCredits = queries.length * depth;
+  const runnable = queries.length - checks.size;
+  const maxCredits = runnable * depth;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink/40 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="query-modal-title">
@@ -89,7 +101,7 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
                 <div key={q.id} data-query-row className={`px-5 py-3.5 flex flex-col gap-2.5 ${editing ? 'bg-canvas' : ''}`}>
                   <div className="flex items-center gap-2 min-w-0">
                     <PlatformBadge platform={q.platform} />
-                    <span className="text-body-sm font-medium text-ink truncate">{template ? template.label : 'Custom query'}</span>
+                    <span className="text-body-sm font-medium text-ink truncate">{queryLabel(q.query_type)}</span>
                     {q.is_edited && <span className="chip">edited</span>}
                     <span
                       className={`chip tabular-nums ${over ? 'text-warning-deep border-warning' : ''}`}
@@ -118,6 +130,10 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
                     <p className="font-mono text-body-xs text-mute truncate" title={template.pattern}>
                       {template.pattern}
                     </p>
+                  )}
+                  {!template && q.notes && !editing && <p className="text-body-xs text-mute">{q.notes}</p>}
+                  {checks.has(q.id) && (
+                    <p className="text-body-xs text-error-deep">Will be skipped — {checks.get(q.id)!.join(' ')}</p>
                   )}
 
                   {editing ? (
@@ -157,8 +173,8 @@ export function QueryPreviewModal({ isOpen, onClose, queries: initialQueries, co
             <button type="button" onClick={onClose} className="btn-ghost">
               Cancel
             </button>
-            <button type="button" onClick={() => onConfirm(queries, depth)} disabled={isLoading || queries.length === 0} className="btn-primary">
-              Run {queries.length} {queries.length === 1 ? 'query' : 'queries'}
+            <button type="button" onClick={() => onConfirm(queries, depth)} disabled={isLoading || runnable === 0} className="btn-primary">
+              Run {runnable} {runnable === 1 ? 'query' : 'queries'}
             </button>
           </div>
         </div>

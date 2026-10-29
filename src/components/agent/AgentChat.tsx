@@ -13,7 +13,7 @@ import { QueryPreviewModal } from '@/components/ingestion/QueryPreviewModal';
 import { ProcessingOverlay, ProcessingState, ProcessingLogItem } from '@/components/processing/ProcessingOverlay';
 import { useRunFinished, useRunTracker } from '@/components/runs/RunTracker';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
-import { getTemplate } from '@/lib/search/xrayTemplates';
+import { queryLabel } from '@/lib/search/xrayTemplates';
 import { platformLabel } from '@/lib/search/platforms';
 import type { QueryRunResult } from '@/lib/search/x-raySearchService';
 import { Avatar } from '@/components/ui/Avatar';
@@ -133,7 +133,7 @@ export function AgentChat() {
     const items: ProcessingLogItem[] = queriesToRun.map((q) => ({
       id: q.id,
       platform: q.platform,
-      label: getTemplate(q.query_type)?.label ?? 'Custom query',
+      label: queryLabel(q.query_type),
       state: 'active',
       meta: 'queued',
     }));
@@ -384,7 +384,7 @@ export function AgentChat() {
 
       {/* ===== Right panel: everything extracted so far ===== */}
       {panelOpen && (
-        <aside className="lg:w-[380px] xl:w-[420px] flex-shrink-0 border-t lg:border-t-0 lg:border-l border-hairline bg-elevated flex flex-col min-h-0 lg:h-screen" aria-label="Extracted scope">
+        <aside className="lg:w-[380px] xl:w-[420px] flex-shrink-0 border-t lg:border-t-0 lg:border-l border-hairline bg-elevated flex flex-col min-h-0 lg:h-full lg:sticky lg:top-0 lg:self-start lg:max-h-screen" aria-label="Extracted scope">
           <div className="h-12 flex-shrink-0 px-4 border-b border-hairline flex items-center justify-between">
             <span className="text-label-sm text-ink">Scope so far</span>
             <span className="text-body-xs text-mute tabular-nums">
@@ -455,7 +455,7 @@ export function AgentChat() {
                 <ul className="flex flex-col gap-1">
                   {queries.slice(0, 8).map((q) => (
                     <li key={q.id} className="flex items-center gap-1.5 text-body-xs text-body">
-                      <PlatformBadge platform={q.platform} /> {getTemplate(q.query_type)?.label ?? 'Custom'}
+                      <PlatformBadge platform={q.platform} /> {queryLabel(q.query_type)}
                     </li>
                   ))}
                   {queries.length > 8 && <li className="text-body-xs text-mute">+{queries.length - 8} more</li>}

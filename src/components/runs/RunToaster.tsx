@@ -6,7 +6,7 @@ import { Check, ChevronDown, Loader2, Minus, Search, X, AlertTriangle } from 'lu
 import { useRunTracker } from './RunTracker';
 import { ProgressBar } from '@/components/processing/ProcessingOverlay';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
-import { getTemplate } from '@/lib/search/xrayTemplates';
+import { queryLabel } from '@/lib/search/xrayTemplates';
 import type { RunQuerySnapshot, RunSnapshot } from '@/lib/search/runTypes';
 
 // ---------------------------------------------------------------------------
@@ -107,7 +107,7 @@ function RunRow({ run }: { run: RunSnapshot }) {
             <li key={q.queryId} className="px-3 py-1.5 flex items-center gap-2 text-body-xs">
               <QueryGlyph outcome={q.outcome} />
               <PlatformBadge platform={q.platform} />
-              <span className="text-body truncate flex-1">{getTemplate(q.queryType)?.label ?? 'Custom query'}</span>
+              <span className="text-body truncate flex-1">{queryLabel(q.queryType)}</span>
               <span className={`tabular-nums flex-shrink-0 ${q.outcome === 'failed' ? 'text-warning-deep' : 'text-mute'}`}>
                 {q.outcome === 'fetched'
                   ? `${q.keptCount}/${q.resultCount}`

@@ -22,6 +22,7 @@ import {
 import type { QueryRunResult, SearchStats, XRaySearchResult } from '../search/x-raySearchService';
 import { canonicalizeQueryString } from '../search/queryValidation';
 import { defaultFollowUpDays, isAtLeast } from '../pipeline/stages';
+import { deduplicateCandidates, findFuzzyDuplicate } from '../utils/deduplication';
 
 // ---------------------------------------------------------------------------
 // Session repository.
@@ -314,6 +315,102 @@ export async function persistRunCandidates(
 
   const rows = await prisma.candidate.findMany({ where: { jobId }, orderBy: [{ matchScore: 'desc' }, { name: 'asc' }] });
   return rows.map(toCandidateProfile);
+}
+
+/**
+ * Persists ONE query's indexed profiles onto the session as soon as the query
+ * lands — the background worker's write path. Because a serverless worker can
+ * be frozen between queries, nothing may wait in memory for the end of the
+ * run. Dedupe therefore runs against what the session already holds:
+ *   - same canonical URL  → the stored row is refreshed (recruiter edits kept);
+ *   - same person by name + location (findFuzzyDuplicate) → skills are merged
+ *     into the stored row and the higher score is kept, no new card;
+ *   - otherwise           → a new card.
+ * Callers must serialise calls per session (the worker chains them) so two
+ * queries finishing together can't both create the same person.
+ * Returns how many new cards were created.
+ */
+export async function persistQueryCandidates(
+  jobId: string,
+  runId: string,
+  tier: 'free' | 'precision',
+  candidates: CandidateProfile[]
+): Promise<number> {
+  if (candidates.length === 0) return 0;
+  const batch = deduplicateCandidates(candidates);
+  const stored = await prisma.candidate.findMany({
+    where: { jobId },
+    select: { id: true, name: true, location: true, profileUrlCanonical: true, skillsDetected: true, matchScore: true },
+  });
+  const byCanonical = new Set(stored.map((s) => s.profileUrlCanonical));
+  const pool = stored.map((s) => ({ ...s, skills: Array.isArray(s.skillsDetected) ? (s.skillsDetected as string[]) : [] }));
+
+  let created = 0;
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
+  for (const c of batch) {
+    const key = candidateKey(c);
+    const scraped = {
+      name: c.name,
+      headline: c.headline,
+      platform: c.platform,
+      avatarUrl: c.avatar_url ?? null,
+      skillsDetected: toJson(c.skills_detected),
+      experienceYearsEstimated: c.experience_years_estimated ?? null,
+      summarySnippet: c.summary_snippet,
+      matchScore: c.match_score,
+      matchBreakdown: toJson(c.match_breakdown),
+      matchRationale: c.match_rationale,
+      missingSignals: toJson(c.missing_signals),
+      dataCompleteness: c.data_completeness,
+      rawScrapedData: c.raw_scraped_data ? toJson(c.raw_scraped_data) : undefined,
+      sourceQueryId: c.source_query ?? null,
+      sourceRunId: runId,
+      sourceTier: tier,
+      scrapeStatus: c.scrape_status,
+    };
+
+    if (!byCanonical.has(key)) {
+      const twin = findFuzzyDuplicate(c, pool);
+      if (twin) {
+        const skills = Array.from(new Set([...twin.skills, ...c.skills_detected]));
+        twin.skills = skills;
+        const better = c.match_score > twin.matchScore;
+        if (better) twin.matchScore = c.match_score;
+        writes.push(
+          prisma.candidate.update({
+            where: { id: twin.id },
+            data: {
+              skillsDetected: toJson(skills),
+              ...(better ? { matchScore: c.match_score, matchBreakdown: toJson(c.match_breakdown), matchRationale: c.match_rationale } : {}),
+            },
+          })
+        );
+        continue;
+      }
+      // The batch was already deduped against itself above, so only stored
+      // rows can be twins; no need to add this one to the pool.
+      created++;
+      byCanonical.add(key);
+    }
+
+    writes.push(
+      prisma.candidate.upsert({
+        where: { jobId_profileUrlCanonical: { jobId, profileUrlCanonical: key } },
+        create: {
+          ...scraped,
+          jobId,
+          location: c.location,
+          profileUrl: c.profile_url,
+          profileUrlCanonical: key,
+          status: 'New',
+          discoveredAt: new Date(c.discovered_at),
+        },
+        update: c.location && !/not specified/i.test(c.location) ? { ...scraped, location: c.location } : scraped,
+      })
+    );
+  }
+  await prisma.$transaction(writes);
+  return created;
 }
 
 export async function recordSearchRun(

@@ -3,9 +3,13 @@ import { requireSession } from '@/lib/session';
 import { getSession } from '@/lib/db/sessions';
 import { listRunSnapshots } from '@/lib/db/searchRuns';
 import { getProviderKey } from '@/lib/credentials';
-import { startSearchRun } from '@/lib/search/runManager';
+import { resumeStalledRuns, startSearchRun } from '@/lib/search/runManager';
 
 export const dynamic = 'force-dynamic';
+// The search keeps working after the response (waitUntil in runManager), so
+// the invocation must be allowed to live past it. A run longer than this is
+// handed back at the deadline and resumed by the next poll of GET below.
+export const maxDuration = 300;
 
 /**
  * POST /api/search-runs — starts a search in the background and returns its
@@ -69,6 +73,9 @@ export async function GET() {
   const { session, unauthorized } = await requireSession();
   if (unauthorized) return unauthorized;
   try {
+    // Polling is what keeps a serverless run moving: take over any run of this
+    // user's whose worker went quiet, before reporting progress.
+    await resumeStalledRuns(session!.user.id).catch((err) => console.error('Could not resume stalled runs:', err));
     const runs = await listRunSnapshots(session!.user.id);
     return NextResponse.json({ runs });
   } catch (err: any) {

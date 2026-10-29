@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateQueriesWithDeepSeek, generateQueryBundleForConstraints } from '@/lib/ai/client';
+import { planQueries } from '@/lib/ai/client';
 import { requireSession } from '@/lib/session';
 
-export const maxDuration = 30;
+// The reasoning model thinks before it plans; give it room.
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
@@ -22,12 +23,14 @@ export async function POST(req: NextRequest) {
 
     const customKey = clientApiKey || req.headers.get('x-deepseek-api-key') || process.env.DEEPSEEK_API_KEY;
 
-    // Generate queries using DeepSeek AI
-    const queries = await generateQueriesWithDeepSeek(constraints, customKey);
+    // The reasoning model plans the bundle; every query is validated before it is returned.
+    const { queries, analysis, report } = await planQueries(constraints, customKey);
 
     return NextResponse.json({
       success: true,
       queries,
+      analysis,
+      plan: report ? { accepted: report.accepted, rejected: report.rejected.length, fallbackPlatforms: report.fallbackPlatforms } : null,
     });
   } catch (error: any) {
     console.error('Error generating AI X-Ray queries:', error);

@@ -4,6 +4,13 @@
 **Written against:** commit `ef6dac4` (branch `main`), 2026-10-27. Every behaviour described below was read from source; the sample queries in §6 were produced by running the real generator code, not written by hand.
 **How to use this document:** §1 is the product, §2–§5 describe exactly how search works today, §6 shows real output, §7 lists the defects that hurt search quality, and §8 is the planning framework and the list of levers for query optimisation. §9 lists invariants a redesign must keep. §10 lists open questions for the product owner.
 
+> **Update — branch `fix/search-runs-export-agent-ui` (2026-10-29).** Sections below describe `ef6dac4`; this branch changes:
+> - **Runs on serverless (G15):** the worker is resumable. It uses `waitUntil` with `maxDuration` 300, stores profiles per query (`persistQueryCandidates`), holds a heartbeat lease, hands the run back before the invocation deadline, and is resumed by the next `GET /api/search-runs` poll. See `src/lib/search/runManager.ts`.
+> - **Validation enforced (G1):** `startSearchRun` runs `validateBundle`; invalid queries are recorded as skipped and never sent. The Query Preview modal shows the same verdict live.
+> - **Query generation:** DeepSeek **`deepseek-v4-pro` with thinking** now *writes* the queries (`XRAY_QUERY_PLANNER_SYSTEM_PROMPT`, a precision/balanced/recall ladder per platform). `src/lib/search/plannedQueries.ts` gates every query: shape and anchor, 32 words, ungrounded exclusions stripped, orgs enforced, no protected characteristics, dedupe and caps. Templates are the fallback per platform. Parse-time bundles are template drafts only.
+> - **Templates (G2/G3/G8):** `linkedin_pdf` removed; location added to `linkedin_title` and `linkedin_proximity`; no `site:.com`; Xing is a default only for DACH; SerpAPI `gl` is set from the location (G4).
+> - **`isGroundedIn`** now stems ("agency" ↔ "agencies"), so plural exclusions the recruiter wrote are no longer dropped.
+
 ---
 
 ## 1. Product brief

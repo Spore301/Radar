@@ -17,11 +17,11 @@ import { MAX_TEMPLATES_ON_ONE_PLATFORM, TOTAL_TEMPLATE_COUNT, countGoogleWords, 
 export const MAX_QUERY_LENGTH = 2048;
 export const MIN_QUERY_LENGTH = 10;
 export const MAX_SIGNIFICANT_TERMS = GOOGLE_WORD_LIMIT;
-// One query per approved template: a full run over every platform is every
-// template exactly once, and no platform gets more queries than it has
-// templates (LinkedIn, with four, sets the ceiling).
-export const MAX_QUERIES_PER_RUN = TOTAL_TEMPLATE_COUNT;
-export const MAX_QUERIES_PER_PLATFORM = MAX_TEMPLATES_ON_ONE_PLATFORM;
+// Spend ceilings per run. Queries now come from the AI planner as well as the
+// templates, so the caps are explicit rather than "one per template" — but
+// never below what the full template bundle needs.
+export const MAX_QUERIES_PER_RUN = Math.max(16, TOTAL_TEMPLATE_COUNT);
+export const MAX_QUERIES_PER_PLATFORM = Math.max(4, MAX_TEMPLATES_ON_ONE_PLATFORM);
 export const DUPLICATE_SIMILARITY_THRESHOLD = 0.92;
 
 export type IssueCode =

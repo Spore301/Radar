@@ -105,11 +105,11 @@ function mergeConstraints(prev: MergedConstraints, next: AgentModelOutput['const
     out.target_organizations = (out.target_organizations ?? []).filter((o) => !out.excluded_organizations!.some((x) => x.toLowerCase() === o.toLowerCase()));
   }
   if (next.organization_scope === 'current' || next.organization_scope === 'any') out.organization_scope = next.organization_scope;
-  if (next.selected_platforms?.length) out.selected_platforms = sanitizeSelectedPlatforms(next.selected_platforms, out.role_type);
+  if (next.selected_platforms?.length) out.selected_platforms = sanitizeSelectedPlatforms(next.selected_platforms, out.role_type, out.location);
   if (typeof next.additional_details === 'string' && next.additional_details.trim()) {
     out.additional_details = uniq([...(prev.additional_details ?? '').split('\n'), next.additional_details.trim()]).join('\n');
   }
-  if (out.selected_platforms.length === 0) out.selected_platforms = defaultPlatformsForRole(out.role_type);
+  if (out.selected_platforms.length === 0) out.selected_platforms = defaultPlatformsForRole(out.role_type, out.location);
   return out;
 }
 
@@ -215,7 +215,7 @@ function applyReplyToAsked(prev: MergedConstraints, state: AgentState, lastAsked
     } else if (f === 'additional_details') {
       c.additional_details = uniq([...(c.additional_details ?? '').split('\n'), t]).join('\n');
     } else if (f === 'selected_platforms') {
-      const named = sanitizeSelectedPlatforms(t.split(/[,/]|\band\b/).map((x) => x.trim()), c.role_type);
+      const named = sanitizeSelectedPlatforms(t.split(/[,/]|\band\b/).map((x) => x.trim()), c.role_type, c.location);
       if (!/keep/i.test(t) && named.length) c.selected_platforms = named;
     }
   }

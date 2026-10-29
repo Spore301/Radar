@@ -1,9 +1,9 @@
 import { prisma } from './client';
-import { djb2, persistRunCandidates } from './sessions';
+import { djb2 } from './sessions';
 import { canonicalizeQueryString } from '../search/queryValidation';
 import { RUN_HEARTBEAT_TIMEOUT_MS, type RunLifecycle, type RunQueryOutcome, type RunSnapshot } from '../search/runTypes';
-import type { QueryRunResult, XRaySearchResult } from '../search/x-raySearchService';
-import type { XRayQuery } from '../types';
+import type { QueryRunResult } from '../search/x-raySearchService';
+import type { MergedConstraints, XRayQuery } from '../types';
 
 // ---------------------------------------------------------------------------
 // The database side of a background search run.
@@ -15,13 +15,36 @@ import type { XRayQuery } from '../types';
 // can be rebuilt from scratch by any tab at any time.
 // ---------------------------------------------------------------------------
 
-/** Creates the run header plus one pending row per query. */
+/**
+ * What a worker needs to pick a run up again in a fresh process: frozen at
+ * start in SearchRun.estimate (the "what the recruiter confirmed spending"
+ * column), since the query rows and the session's constraints already hold
+ * everything else.
+ */
+export interface RunConfig {
+  maxPagesPerQuery: number;
+  engine: string;
+  /** SerpAPI `gl` country code for location-bound roles; '' when remote / unknown. */
+  gl: string;
+  /** How many times a worker has picked this run up after the first. */
+  resumes: number;
+}
+
+/**
+ * Creates the run header plus one row per query. Queries listed in `blocked`
+ * failed validation: they are recorded as skipped with the reason, so the
+ * receipt shows why they cost nothing, and are never sent to SerpAPI.
+ */
 export async function createRunRow(input: {
   jobId: string;
   userId: string | null;
   queries: XRayQuery[];
   resultsCap: number;
+  config: Omit<RunConfig, 'resumes'>;
+  blocked?: Map<string, string[]>;
 }): Promise<string> {
+  const blocked = input.blocked ?? new Map<string, string[]>();
+  const runnable = input.queries.length - blocked.size;
   const run = await prisma.searchRun.create({
     data: {
       jobId: input.jobId,
@@ -29,25 +52,129 @@ export async function createRunRow(input: {
       tier: 'precision',
       status: 'running',
       stage: 'searching',
-      statusText: `Queued ${input.queries.length} ${input.queries.length === 1 ? 'query' : 'queries'}…`,
+      statusText: `Queued ${runnable} ${runnable === 1 ? 'query' : 'queries'}…`,
       resultsCap: input.resultsCap,
       queriesTotal: input.queries.length,
+      queriesDone: blocked.size,
+      estimate: { ...input.config, resumes: 0 },
       startedById: input.userId ?? undefined,
       heartbeatAt: new Date(),
       queries: {
-        create: input.queries.map((q) => ({
-          queryId: q.id,
-          platform: q.platform,
-          queryType: q.query_type,
-          queryString: q.query_string,
-          canonicalHash: djb2(canonicalizeQueryString(q.query_string)),
-          outcome: 'pending',
-        })),
+        create: input.queries.map((q) => {
+          const issues = blocked.get(q.id);
+          return {
+            queryId: q.id,
+            platform: q.platform,
+            queryType: q.query_type,
+            queryString: q.query_string,
+            canonicalHash: djb2(canonicalizeQueryString(q.query_string)),
+            outcome: issues ? 'skipped' : 'pending',
+            ...(issues
+              ? { validationErrors: issues, errorMessage: `Not run — invalid query: ${issues.join(' ')}`.slice(0, 500), finishedAt: new Date() }
+              : {}),
+          };
+        }),
       },
     },
     select: { id: true },
   });
   return run.id;
+}
+
+// --- Worker lease ------------------------------------------------------------
+//
+// A run is worked by whichever process holds its lease, and the lease is the
+// heartbeat: a live worker refreshes heartbeatAt every few seconds, and any
+// process may take over a run whose heartbeat is older than the lease. Claiming
+// is one conditional UPDATE, so two polls racing for the same stalled run can't
+// both win.
+
+/** Takes over a running run whose last heartbeat is older than `staleBefore`. */
+export async function claimRun(runId: string, staleBefore: Date): Promise<boolean> {
+  const { count } = await prisma.searchRun.updateMany({
+    where: { id: runId, status: 'running', OR: [{ heartbeatAt: null }, { heartbeatAt: { lt: staleBefore } }] },
+    data: { heartbeatAt: new Date() },
+  });
+  return count > 0;
+}
+
+export async function heartbeat(runId: string): Promise<void> {
+  await prisma.searchRun.updateMany({ where: { id: runId, status: 'running' }, data: { heartbeatAt: new Date() } });
+}
+
+/**
+ * Gives a run back unfinished (the invocation is about to hit its time limit):
+ * backdates the heartbeat past the lease so the next poll resumes it at once.
+ */
+export async function releaseRun(runId: string, leaseMs: number, statusText: string): Promise<void> {
+  await prisma.searchRun.updateMany({
+    where: { id: runId, status: 'running' },
+    data: { heartbeatAt: new Date(Date.now() - leaseMs - 1000), statusText },
+  });
+}
+
+/** Stalled runs of this user that a worker may take over. */
+export async function findStalledRuns(userId: string, staleBefore: Date): Promise<string[]> {
+  const rows = await prisma.searchRun.findMany({
+    where: { startedById: userId, status: 'running', OR: [{ heartbeatAt: null }, { heartbeatAt: { lt: staleBefore } }] },
+    select: { id: true },
+    orderBy: { startedAt: 'asc' },
+    take: 3,
+  });
+  return rows.map((r) => r.id);
+}
+
+export interface RunWork {
+  runId: string;
+  jobId: string;
+  userId: string | null;
+  status: string;
+  config: RunConfig;
+  constraints: MergedConstraints;
+  /** Queries not yet finished — including any a dead worker had started. */
+  pending: XRayQuery[];
+}
+
+export async function loadRunWork(runId: string): Promise<RunWork | null> {
+  const run = await prisma.searchRun.findUnique({
+    where: { id: runId },
+    select: {
+      id: true,
+      jobId: true,
+      startedById: true,
+      status: true,
+      estimate: true,
+      job: { select: { mergedConstraints: true } },
+      queries: { where: { outcome: 'pending' }, select: { queryId: true, platform: true, queryType: true, queryString: true }, orderBy: { id: 'asc' } },
+    },
+  });
+  if (!run) return null;
+  const raw = (run.estimate ?? {}) as Partial<RunConfig>;
+  return {
+    runId: run.id,
+    jobId: run.jobId,
+    userId: run.startedById,
+    status: run.status,
+    config: {
+      maxPagesPerQuery: typeof raw.maxPagesPerQuery === 'number' ? raw.maxPagesPerQuery : 5,
+      engine: typeof raw.engine === 'string' ? raw.engine : 'google',
+      gl: typeof raw.gl === 'string' ? raw.gl : '',
+      resumes: typeof raw.resumes === 'number' ? raw.resumes : 0,
+    },
+    constraints: run.job.mergedConstraints as unknown as MergedConstraints,
+    pending: run.queries.map((q) => ({
+      id: q.queryId,
+      platform: q.platform,
+      query_type: q.queryType,
+      query_string: q.queryString,
+      query_intent: '',
+      expected_result_type: 'Profile',
+    })),
+  };
+}
+
+export async function recordResume(runId: string, config: RunConfig): Promise<void> {
+  await prisma.searchRun.update({ where: { id: runId }, data: { estimate: { ...config, resumes: config.resumes + 1 } } });
 }
 
 /** Marks one query as in flight and refreshes the run's heartbeat. */
@@ -62,14 +189,12 @@ export async function markQueryStart(runId: string, queryId: string, statusText:
   });
 }
 
-/** Writes one query's outcome and advances the run counters. */
-export async function markQueryDone(
-  runId: string,
-  result: QueryRunResult,
-  done: number,
-  indexedSoFar: number,
-  total: number
-): Promise<void> {
+/**
+ * Writes one query's outcome and advances the run counters. The counters are
+ * re-read from the query rows rather than kept in memory, so they stay right
+ * across workers when a run is resumed in another invocation.
+ */
+export async function markQueryDone(runId: string, result: QueryRunResult): Promise<void> {
   const outcome: RunQueryOutcome = result.status === 'completed' ? 'fetched' : result.status === 'skipped' ? 'skipped' : 'failed';
   await prisma.searchRunQuery.updateMany({
     where: { runId, queryId: result.queryId },
@@ -83,12 +208,19 @@ export async function markQueryDone(
       finishedAt: new Date(),
     },
   });
+  const [total, done, sums] = await Promise.all([
+    prisma.searchRunQuery.count({ where: { runId } }),
+    prisma.searchRunQuery.count({ where: { runId, outcome: { not: 'pending' } } }),
+    prisma.searchRunQuery.aggregate({ where: { runId }, _sum: { keptCount: true, creditCost: true } }),
+  ]);
+  const indexed = sums._sum.keptCount ?? 0;
   await prisma.searchRun.update({
     where: { id: runId },
     data: {
       queriesDone: done,
-      rawResultCount: indexedSoFar,
-      statusText: `${done} of ${total} queries done · ${indexedSoFar} ${indexedSoFar === 1 ? 'profile' : 'profiles'} indexed`,
+      rawResultCount: indexed,
+      creditsCommitted: sums._sum.creditCost ?? 0,
+      statusText: `${done} of ${total} queries done · ${indexed} ${indexed === 1 ? 'profile' : 'profiles'} indexed`,
       heartbeatAt: new Date(),
     },
   });
@@ -99,25 +231,30 @@ export async function markStage(runId: string, stage: string, statusText: string
 }
 
 /**
- * Stores the run's profiles and closes the run out. Mirrors recordSearchRun's
- * bookkeeping, but updates the row that was created when the run started
- * instead of inserting a new one.
+ * Closes a run out once no query is pending. Profiles were already stored
+ * query by query (persistQueryCandidates), so this only totals the receipt,
+ * settles the run's status and the session's counters.
  */
-export async function finalizeRun(
-  runId: string,
-  jobId: string,
-  result: XRaySearchResult,
-  resultsCap: number
-): Promise<{ candidateCount: number }> {
-  const usedSerpApi = result.queryResults.some((q) => q.provider === 'serpapi');
-  const tier: 'free' | 'precision' = usedSerpApi ? 'precision' : 'free';
-  const anyCompleted = result.queryResults.some((q) => q.status === 'completed');
-  const allCompleted = result.queryResults.length > 0 && result.queryResults.every((q) => q.status === 'completed');
-  const status: RunLifecycle = allCompleted ? 'completed' : anyCompleted ? 'partial' : 'failed';
+export async function finalizeRun(runId: string, jobId: string): Promise<{ candidateCount: number }> {
+  const queries = await prisma.searchRunQuery.findMany({ where: { runId }, select: { outcome: true, provider: true, keptCount: true, creditCost: true } });
+  const run = await prisma.searchRun.findUnique({ where: { id: runId }, select: { abortRequested: true } });
+  const completed = queries.filter((q) => q.outcome === 'fetched' || q.outcome === 'cache_hit').length;
+  const status: RunLifecycle = run?.abortRequested
+    ? 'aborted'
+    : queries.length > 0 && completed === queries.length
+      ? 'completed'
+      : completed > 0
+        ? 'partial'
+        : 'failed';
+  const tier: 'free' | 'precision' = queries.some((q) => q.provider === 'serpapi') ? 'precision' : 'free';
+  const indexed = queries.reduce((s, q) => s + q.keptCount, 0);
+  const credits = queries.reduce((s, q) => s + q.creditCost, 0);
+  const [fromRun, total] = await Promise.all([
+    prisma.candidate.count({ where: { jobId, sourceRunId: runId } }),
+    prisma.candidate.count({ where: { jobId } }),
+  ]);
 
-  await markStage(runId, 'storing', `Storing ${result.candidates.length} ${result.candidates.length === 1 ? 'profile' : 'profiles'}…`);
-  const stored = await persistRunCandidates(jobId, runId, tier, result.candidates);
-
+  await prisma.job.update({ where: { id: jobId }, data: { status: completed > 0 || total > 0 ? 'complete' : 'draft', candidateCount: total } });
   await prisma.searchRun.update({
     where: { id: runId },
     data: {
@@ -125,19 +262,20 @@ export async function finalizeRun(
       status,
       stage: 'done',
       statusText:
-        status === 'failed'
-          ? 'Every query failed — no profiles stored.'
-          : `${result.stats.queriesRun} of ${result.queryResults.length} queries · ${result.stats.total} indexed · ${stored.length} stored`,
-      creditsCommitted: result.stats.creditsUsed,
-      queriesDone: result.stats.queriesRun,
-      rawResultCount: result.stats.total,
-      candidateCount: stored.length,
+        status === 'aborted'
+          ? `Stopped. ${fromRun} ${fromRun === 1 ? 'profile' : 'profiles'} found before stopping were saved.`
+          : status === 'failed'
+            ? 'Every query failed — no profiles stored.'
+            : `${completed} of ${queries.length} queries · ${indexed} indexed · ${fromRun} stored`,
+      creditsCommitted: credits,
+      queriesDone: queries.length,
+      rawResultCount: indexed,
+      candidateCount: fromRun,
       finishedAt: new Date(),
       heartbeatAt: new Date(),
     },
   });
-  // The session's own counters are updated by persistRunCandidates.
-  return { candidateCount: stored.length };
+  return { candidateCount: fromRun };
 }
 
 /** Closes a run out as failed. Never throws — it runs inside a catch block. */
@@ -149,8 +287,10 @@ export async function failRun(runId: string, jobId: string, message: string): Pr
       data: { status: 'failed', stage: 'done', statusText: text, errorMessage: text, finishedAt: new Date(), heartbeatAt: new Date() },
     })
     .catch(() => {});
-  // The session itself goes back to 'draft': the bundle is still there to re-run.
-  await prisma.job.update({ where: { id: jobId }, data: { status: 'draft' } }).catch(() => {});
+  // The bundle is still there to re-run. Profiles stored before the failure
+  // (they are saved query by query) keep the session 'complete'.
+  const stored = await prisma.candidate.count({ where: { jobId } }).catch(() => 0);
+  await prisma.job.update({ where: { id: jobId }, data: { status: stored > 0 ? 'complete' : 'draft', candidateCount: stored } }).catch(() => {});
 }
 
 /**
@@ -171,13 +311,6 @@ export async function requestAbort(runId: string, userId: string): Promise<boole
 export async function isAbortRequested(runId: string): Promise<boolean> {
   const row = await prisma.searchRun.findUnique({ where: { id: runId }, select: { abortRequested: true } });
   return Boolean(row?.abortRequested);
-}
-
-export async function markAborted(runId: string): Promise<void> {
-  await prisma.searchRun.update({
-    where: { id: runId },
-    data: { status: 'aborted', stage: 'done', statusText: 'Stopped. Profiles found before stopping were saved.', finishedAt: new Date() },
-  });
 }
 
 // --- Reading -----------------------------------------------------------------

@@ -12,6 +12,18 @@ export interface SerpOptions {
   engine?: SerpEngine;
   /** Upper bound on pages (credits) per query. Default: SERP_MAX_PAGES_PER_QUERY env or 5. */
   maxPagesPerQuery?: number;
+  /**
+   * SerpAPI `gl` country code ('in', 'uk', 'de', …). Searching from the
+   * requisition's country ranks local profiles higher; '' searches from
+   * SerpAPI's default vantage point (remote / unknown location).
+   */
+  gl?: string;
+  /**
+   * Epoch ms after which no further SERP page is started — set by a worker
+   * running under an invocation deadline, so a deep query stops paging (and
+   * keeps what it has) instead of being killed mid-flight. 0 = no limit.
+   */
+  stopAt?: number;
 }
 
 /** Google serves 10 organic results per page since it dropped `num=100` (Sept 2025). */
@@ -26,5 +38,15 @@ export function resolveSerpOptions(opts?: SerpOptions): Required<SerpOptions> {
   return {
     engine: opts?.engine === 'google_light' || opts?.engine === 'google' ? opts.engine : envEngine,
     maxPagesPerQuery: Math.min(HARD_MAX_PAGES_PER_QUERY, Math.max(1, Math.floor(requested))),
+    gl: typeof opts?.gl === 'string' && /^[a-z]{2}$/i.test(opts.gl) ? opts.gl.toLowerCase() : '',
+    stopAt: typeof opts?.stopAt === 'number' && opts.stopAt > 0 ? opts.stopAt : 0,
   };
+}
+
+/** Country-code TLD from the location table → SerpAPI `gl` ('.co.uk' → 'uk', '.com' → 'us'). */
+export function glFromTld(tld: string): string {
+  if (!tld) return '';
+  if (tld === '.com') return 'us';
+  const last = tld.split('.').pop() ?? '';
+  return /^[a-z]{2}$/.test(last) ? last : '';
 }

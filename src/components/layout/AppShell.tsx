@@ -167,7 +167,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="flex-1 min-w-0 flex flex-col">
         {pathname.startsWith('/dashboard/agent') ? (
           // The agent is a full-height chat surface, like a messaging app: no centred column, no page padding.
-          <div className="flex-1 min-h-0 lg:h-screen flex flex-col">{children}</div>
+          // On desktop it is pinned to exactly one viewport (flex-none, not flex-1: a flex-basis of 0% inside
+          // this auto-height column resolves to the content height and silently overrides h-screen, so a long
+          // chat used to grow the page and scroll the scope panel away). The chat scrolls inside itself.
+          <div className="flex-1 min-h-0 flex flex-col lg:flex-none lg:h-screen lg:overflow-hidden">{children}</div>
         ) : (
           <div className="max-w-content mx-auto w-full px-5 sm:px-8 py-6 sm:py-8">{children}</div>
         )}

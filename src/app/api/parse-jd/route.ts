@@ -5,7 +5,7 @@ import { requireSession } from '@/lib/session';
 import { createSession } from '@/lib/db/sessions';
 import { ndjsonResponse } from '@/lib/api/ndjson';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 const STAGES = ['extract', 'structure', 'queries', 'keywords', 'session'] as const;

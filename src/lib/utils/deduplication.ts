@@ -49,6 +49,33 @@ function candidateKey(candidate: CandidateProfile): string {
   return candidate.profile_url.toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '');
 }
 
+/** The location test used by the fuzzy pass; deliberately loose, since the name must already match. */
+function shareLocation(a: string, b: string): boolean {
+  const loc1 = a.toLowerCase();
+  const loc2 = b.toLowerCase();
+  return (
+    loc1.includes(loc2) ||
+    loc2.includes(loc1) ||
+    (loc1.includes('bangalore') && loc2.includes('bangalore')) ||
+    (loc1.includes('remote') && loc2.includes('remote'))
+  );
+}
+
+/**
+ * The fuzzy half of the dedupe rule on its own: is `candidate` the same person
+ * as one of `pool` (identifying name within Levenshtein 2, and a shared known
+ * location)? Used by the background worker, which persists each query as it
+ * lands and so has to match against what is already stored for the session.
+ */
+export function findFuzzyDuplicate<T extends { name: string; location: string }>(candidate: { name: string; location: string }, pool: T[]): T | null {
+  if (!isIdentifyingName(candidate.name) || candidate.location === UNKNOWN_LOCATION) return null;
+  for (const existing of pool) {
+    if (!isIdentifyingName(existing.name) || existing.location === UNKNOWN_LOCATION) continue;
+    if (levenshteinDistance(candidate.name, existing.name) <= 2 && shareLocation(candidate.location, existing.location)) return existing;
+  }
+  return null;
+}
+
 /**
  * Deduplicates candidates based on:
  * 1. Exact match on canonical profile URL (never loses a distinct profile)
@@ -67,37 +94,14 @@ export function deduplicateCandidates(candidates: CandidateProfile[]): Candidate
     }
 
     // Check against already accepted deduplicated candidates
-    let isDuplicate = false;
-    const fuzzyEligible =
-      isIdentifyingName(candidate.name) && candidate.location !== UNKNOWN_LOCATION;
-    for (const existing of fuzzyEligible ? deduplicated : []) {
-      if (!isIdentifyingName(existing.name) || existing.location === UNKNOWN_LOCATION) continue;
-      const nameDistance = levenshteinDistance(candidate.name, existing.name);
-
-      // If name is very similar (e.g., "Arjun Sharma" vs "Arjun Sharma ")
-      if (nameDistance <= 2) {
-        // Compare locations
-        const loc1 = candidate.location.toLowerCase();
-        const loc2 = existing.location.toLowerCase();
-        
-        const shareLocation =
-          loc1.includes(loc2) ||
-          loc2.includes(loc1) ||
-          (loc1.includes('bangalore') && loc2.includes('bangalore')) ||
-          (loc1.includes('remote') && loc2.includes('remote'));
-
-        if (shareLocation) {
-          isDuplicate = true;
-          // Merge skills and pick higher match score if duplicate found
-          existing.skills_detected = Array.from(
-            new Set([...existing.skills_detected, ...candidate.skills_detected])
-          );
-          if (candidate.match_score > existing.match_score) {
-            existing.match_score = candidate.match_score;
-            existing.match_breakdown = candidate.match_breakdown;
-          }
-          break;
-        }
+    const existing = findFuzzyDuplicate(candidate, deduplicated);
+    const isDuplicate = existing !== null;
+    if (existing) {
+      // Merge skills and pick higher match score if duplicate found
+      existing.skills_detected = Array.from(new Set([...existing.skills_detected, ...candidate.skills_detected]));
+      if (candidate.match_score > existing.match_score) {
+        existing.match_score = candidate.match_score;
+        existing.match_breakdown = candidate.match_breakdown;
       }
     }
 
