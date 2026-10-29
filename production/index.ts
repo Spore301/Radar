@@ -1,5 +1,5 @@
 import { searchWithSerpApi } from './serpapi';
-import type { SearchEngineModule } from '../types';
+import type { SearchEngineModule } from '@/lib/search/searchEngine';
 
 // ---------------------------------------------------------------------------
 // Production engine — what RADR. ships with. Google results through SerpAPI,

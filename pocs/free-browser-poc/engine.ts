@@ -1,12 +1,11 @@
-import type { RawSearchResult, SerpProvider } from '../../search/serp';
-import type { SearchEngineModule } from '../types';
+import type { RawSearchResult, SerpProvider } from '@/lib/search/serp';
+import type { SearchEngineModule } from '@/lib/search/searchEngine';
 
 // ---------------------------------------------------------------------------
 // EXPERIMENTAL search engine — X-Ray search with no SERP API.
 //
-// One subfolder of src/lib/search-engines/ per engine under test; see the
-// README next to this file, and src/lib/search-engines/README.md for the
-// pattern every engine implements.
+// One subfolder of /pocs/ per engine under test; see the README next to this
+// file, and /pocs/README.md for the pattern every POC follows.
 //
 // What was measured before this was written (see README.md in this folder):
 //   * plain HTTP requests to DuckDuckGo, Brave, Mojeek, Startpage and Yahoo

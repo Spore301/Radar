@@ -1,4 +1,4 @@
-import { SEARCH_ENGINES } from '../search-engines/registry';
+import { SEARCH_ENGINES } from './engineRegistry';
 
 // ---------------------------------------------------------------------------
 // SERP orchestrator — runs ONE X-Ray query string and returns every organic
@@ -8,11 +8,12 @@ import { SEARCH_ENGINES } from '../search-engines/registry';
 //
 // This module owns the POLICY (which engine to try, in what order, how to
 // fall back) and the public types every caller shares. The actual fetching —
-// SerpAPI's paging, or the experimental headless-browser search — lives one
-// level up in src/lib/search-engines/<engine>/, each implementing the
-// SearchEngineModule contract (src/lib/search-engines/types.ts). See
-// src/lib/search-engines/README.md for the full pattern, including how to
-// add another engine to test.
+// SerpAPI's paging, or an experimental engine's own approach — lives OUTSIDE
+// src/, in two root-level folders: /production/ (ships to users) and
+// /pocs/<name>/ (one complete, standalone proof of concept per folder), each
+// implementing the SearchEngineModule contract (./searchEngine.ts). See
+// /pocs/README.md for the full pattern, including how to add another engine
+// to test.
 // ---------------------------------------------------------------------------
 
 export interface RawSearchResult {
@@ -60,7 +61,7 @@ export interface SerpApiKeys {
  *   serpapi (default) — the production engine (SerpAPI), paged to depth; the
  *                       experimental engine only as a fallback when it errors.
  *   browser           — EXPERIMENTAL, no SERP API at all: see
- *                       src/lib/search-engines/free-browser-poc/.
+ *                       /pocs/free-browser-poc/.
  *   auto              — the production engine when there is a key, otherwise
  *                       the experimental one.
  */

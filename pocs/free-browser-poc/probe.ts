@@ -1,15 +1,18 @@
-// EXPERIMENTAL harness for the no-SERP-API provider (feat/free-search-poc).
-// Runs real generated bundles through searchOneQuery() → headless Bing → the indexer and
-// reports results, profiles and blocks per query. It scrapes Bing's result pages, which is
-// against Bing's terms of service — run it sparingly, by hand, from your own machine:
-//   PLAYWRIGHT_CHANNEL=msedge npx tsx scripts/free-search-probe.ts
+// Standalone demonstration/probe for this POC — the thing that makes this
+// folder a complete POC rather than just an engine file: you can run this on
+// its own and see real results, without the rest of the app.
+// Runs real generated bundles through searchOneQuery() → headless Bing (./engine.ts)
+// → the indexer, and reports results, profiles and blocks per query. It scrapes
+// Bing's result pages, which is against Bing's terms of service — run it
+// sparingly, by hand, from your own machine:
+//   PLAYWRIGHT_CHANNEL=msedge npm run test:poc:free-browser
 // (~25 queries × up to 2 pages each, serialised with human pacing: roughly 3–5 minutes.)
 process.env.SEARCH_PROVIDER = 'browser';
 process.env.PLAYWRIGHT_CHANNEL = process.env.PLAYWRIGHT_CHANNEL || 'msedge';
-const R = '../src/lib/';
+const R = '../../src/lib/';
 const { searchOneQuery } = require(R + 'search/x-raySearchService');
 const { generateQueryBundleForConstraints } = require(R + 'ai/client');
-const { closeBrowserSearch, toBingQuery } = require(R + 'search-engines/free-browser-poc/engine');
+const { closeBrowserSearch, toBingQuery } = require('./engine');
 const { deduplicateCandidates } = require(R + 'utils/deduplication');
 
 const base = { years_of_experience: { min: 0, max: 10 }, remote_eligible: false, nice_to_have_skills: [], domain: [], education: '', additional_details: '', results_cap: 50 };

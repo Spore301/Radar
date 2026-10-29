@@ -2,14 +2,16 @@ import type { SerpApiKeys, RawSearchResult, SerpProvider } from '../search/serp'
 import type { SerpOptions } from '../search/serpConfig';
 
 // ---------------------------------------------------------------------------
-// The contract every search-engine subfolder implements.
+// The contract every search engine implements — the shared boundary between
+// this app (src/lib/search/*) and the pluggable engines that live outside it,
+// in /production/ and /pocs/<name>/ at the repo root.
 //
 // A "search engine" here is narrowly scoped: given one X-Ray query string, go
 // get the raw organic results (title, url, snippet). Everything else — which
 // templates build the query, which results are profile-shaped, how a profile
 // is scored, how it's deduped and stored — is shared core code in
-// src/lib/search/* and never varies between engines. See README.md in this
-// directory for the full pattern and how to add a new POC.
+// src/lib/search/* and never varies between engines. See /pocs/README.md for
+// the full pattern and how to add a new POC.
 // ---------------------------------------------------------------------------
 
 export type SearchEngineKeys = SerpApiKeys;

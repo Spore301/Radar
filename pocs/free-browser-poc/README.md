@@ -1,6 +1,10 @@
 # free-browser-poc — X-Ray search without a SERP API
 
-**Status:** experimental. **Not for production.** Implements the `SearchEngineModule` contract (`../types.ts`) as `freeBrowserPocEngine`, exported from `engine.ts`.
+See [`/pocs/README.md`](../README.md) for the pattern every POC folder follows.
+
+**Status:** experimental. **Not for production.** Implements the `SearchEngineModule` contract (`src/lib/search/searchEngine.ts`) as `freeBrowserPocEngine`, exported from `engine.ts`.
+
+Everything needed to understand, run and evaluate this POC on its own is in this folder: the implementation (`engine.ts`), this README with what was measured, and a standalone runnable demonstration (`probe.ts`) that needs nothing from the rest of the app except the shared query-building and indexing code it's being measured against.
 
 ## Goal
 
@@ -57,7 +61,7 @@ Then run a search as usual. To compare quality without the UI:
 PLAYWRIGHT_CHANNEL=msedge npm run test:poc:free-browser
 ```
 
-(runs `scripts/free-search-probe.ts`, which imports `freeBrowserPocEngine` from this folder.)
+(runs `probe.ts`, right here in this folder.)
 
 ## Not yet measured
 
@@ -73,4 +77,4 @@ The full-bundle volume run was **not executed** as part of building this. It is 
 3. **Datacenter IPs fare worse.** These measurements came from a residential connection. Bing challenges cloud IP ranges much sooner.
 4. **It is slow.** Searches are serialised with human pacing, about 3–6 s per page versus SerpAPI's parallel calls. A 10-query, 2-page run takes roughly 1–2 minutes.
 5. **Bing ≠ Google.** The index and ranking differ, and Bing has no `AROUND`. Precision on long Boolean strings is lower, so expect more off-target results on broad queries.
-6. **Other free or cheap alternatives** worth a subfolder of their own, see `../google-cse-poc/` and `../brave-api-poc/` (not yet implemented). A self-hosted SearXNG was considered too, but it scrapes the same engines and so inherits the same blocking — not worth its own folder until one of the API-based options proves insufficient.
+6. **Other free or cheap alternatives** worth their own POC folder one day — see the candidates list in [`/pocs/README.md`](../README.md#candidate-future-pocs-not-started) (Google Programmable Search, the Brave Search API). A self-hosted SearXNG was considered too, but it scrapes the same engines and so inherits the same blocking — not worth its own folder until one of the API-based options proves insufficient.

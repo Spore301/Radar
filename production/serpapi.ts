@@ -1,5 +1,5 @@
-import type { RawSearchResult } from '../../search/serp';
-import type { SearchEngineOptions } from '../types';
+import type { RawSearchResult } from '@/lib/search/serp';
+import type { SearchEngineOptions } from '@/lib/search/searchEngine';
 
 // ---------------------------------------------------------------------------
 // The SerpAPI call itself — paging, parsing, and reading back what Google
