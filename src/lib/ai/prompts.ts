@@ -16,8 +16,9 @@ RULES — you must follow every one of these:
    must_have — put them in nice_to_have. A consulting or management JD with no hard skills should have an EMPTY must_have and
    a rich domain[] (e.g. ["Artificial Intelligence", "Generative AI", "Enterprise consulting"]).
 3b. location.primary is the city/region exactly as the JD states it ("Kolkata", "Bengaluru / Hyderabad", "NCR"); location.country
-   is the country when stated or unambiguous from the city, else null. remote_eligible is true only if the JD says remote,
-   hybrid, WFH or distributed. Never invent a location.
+   is the country when stated or unambiguous from the city, else null. remote_eligible is true only if the JD says the
+   role can be done remotely (remote, WFH, work from anywhere, distributed). Hybrid and on-site roles are NOT remote:
+   set false — the candidate must live within commuting distance. Never invent a location.
 3c. target_organizations: companies or institutions the JD names as REQUIRED or strongly preferred backgrounds — "ex-McKinsey",
    "from a FAANG company" (expand to the named companies only if the JD names them; otherwise keep "FAANG"), "IIT/IIM graduates",
    "Big 4 experience". Use the names as written, one per entry. NEVER include the hiring company itself, its parents, clients or
@@ -71,9 +72,12 @@ HOW GOOGLE AND THESE PAGES ACTUALLY BEHAVE (facts, not style)
 - Space = AND. OR must be UPPER CASE and grouped: ("A" OR "B"). Quote multi-word phrases. A leading minus
   excludes: -word or -"two words". Never write a bare AND.
 - LinkedIn public profile page titles read "Name – Headline/Title – Current Company | LinkedIn", and the
-  snippet usually starts with the profile's location ("Bengaluru, Karnataka, India · …"). So: the job title
-  is the single strongest LinkedIn signal; intitle:"Title" (or intitle:("A" OR "B")) is high precision;
-  putting the city as a plain term is reliable; the current employer is in the title, past ones are not.
+  snippet is LinkedIn's own description: "Experience: Acme · Education: IIT Delhi · Location: Bengaluru ·
+  500+ connections". The profile's top card carries "Bengaluru, Karnataka, India" or "Greater Bengaluru
+  Area". So: the job title is the single strongest LinkedIn signal; intitle:"Title" (or intitle:("A" OR "B"))
+  is high precision; the city as a plain quoted term is reliable; the current employer is in the title,
+  past ones are not. A city also appears on pages for other reasons (a university, a past job), so the
+  city in the query finds candidates; it does not prove where they live — RADR. checks that afterwards.
 - LinkedIn serves country subdomains (in.linkedin.com, uk.linkedin.com, de.linkedin.com …).
   site:linkedin.com/in/ matches all of them. Do not restrict to a subdomain — use the city/region terms.
 - LinkedIn /in/ pages are HTML. "site:linkedin.com/in/ … filetype:pdf" returns nothing — never write it.
@@ -90,7 +94,15 @@ HOW GOOGLE AND THESE PAGES ACTUALLY BEHAVE (facts, not style)
 - Ambiguous one-word skills match everything: write "Golang" not "Go", "Apache Spark" not "Spark",
   "R programming" or "RStudio" not "R", "Java" is fine, "C" never. Generic skills (SQL, Excel, Git, REST,
   Agile, Jira, "communication") barely narrow anything — prefer the rare, specific must-haves.
-- "Remote" as a query term matches nearly every profile. Never use it. For a remote role, drop location.
+- LOCATION IS A HARD CONSTRAINT. <REQUISITION> states it as CITY, COUNTRY or NONE:
+  CITY: EVERY query names the city — quoted, with its common alternate spelling when there is one
+  ("Bengaluru" OR "Bangalore"). Nothing broader (never the state or province: "Karnataka"), nothing else
+  (never another city, never a neighbouring one). For a multi-city role, OR the cities together.
+  COUNTRY: every query names the country ("India"), unless told otherwise.
+  NONE (remote): no place terms at all.
+  "Remote" as a query term matches nearly every profile — never use it. RADR. adds a missing location,
+  removes any other place you write, and after searching discards profiles whose own LinkedIn location is
+  elsewhere — so a query without the right location only wastes the recruiter's credits.
 - Every AND'd term multiplies the narrowing. Two strong signals (title + one rare skill + city) usually
   beat five. If a query would need more than ~4 AND'd groups, split it into two queries instead.
 
@@ -301,7 +313,8 @@ RULES
    seniority.
 2. must_have_skills are SEARCHABLE hard skills only (tools, languages, platforms, methods). Soft skills
    (communication, leadership, ownership…) go to nice_to_have_skills.
-3. Location is the city or region as said ("Kolkata", "Bengaluru / Hyderabad", "Remote, India").
+3. Location is the city or region as said ("Kolkata", "Bengaluru / Hyderabad", "Remote, India"). Hybrid and on-site
+   are NOT remote: remote_eligible is true only when the recruiter says the role can be done remotely.
 3b. Organisations: "people from Google or Meta" → target_organizations ["Google","Meta"]; "currently at" /
    "working at" → organization_scope "current"; "ex-", "worked at", "alumni of", "from IIT" → "any". "Not from
    Infosys", "avoid our clients X and Y" → excluded_organizations. Never put a company name in additional_details.

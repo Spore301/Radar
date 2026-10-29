@@ -1,9 +1,9 @@
 import { getDeadline, waitUntil } from '@vercel/functions';
 import { mapWithConcurrency, sanitizeQueries, searchOneQuery, SERP_CONCURRENCY } from './x-raySearchService';
-import { glFromTld, resolveSerpOptions, serpApiKeyRequired } from './serpConfig';
+import { resolveSerpOptions, serpApiKeyRequired } from './serpConfig';
 import { queryLabel } from './xrayTemplates';
 import { platformLabel } from './platforms';
-import { parseLocation } from './location';
+import { locationScopeFor } from './locationScope';
 import { validateBundle } from './queryValidation';
 import {
   claimRun,
@@ -98,9 +98,10 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
   });
 
   const opts = resolveSerpOptions(input.serpOptions ?? undefined);
-  const loc = parseLocation(input.constraints.location);
-  // A remote role searches from SerpAPI's default vantage point; a city-bound one from its country.
-  const gl = loc.cities.length || (loc.country && !input.constraints.remote_eligible) ? glFromTld(loc.tld) : '';
+  // Search from where the people are: the requisition's country (a remote
+  // role open to one country included). A fully remote role, or one spanning
+  // several countries, searches from the engine's default vantage point.
+  const gl = locationScopeFor(input.constraints).searchFrom;
 
   let runId: string;
   try {

@@ -16,7 +16,8 @@ import {
 import { buildQueryBundle, deriveQueryTerms, mergeQueryTerms, QueryTerms } from '../search/xrayTemplates';
 import { getPlatformMeta, normalizePlatform } from '../search/platforms';
 import { acceptPlannedQueries, PLANNED_CAP, PLANNED_MAX_TOTAL, PlannerAnalysis, PlannerOutput, PlanReport } from '../search/plannedQueries';
-import { parseLocation, detectCityInText, cityDisplay } from '../search/location';
+import { parseLocation, detectCityInText, cityDisplay, jdOffersRemote } from '../search/location';
+import { locationScopeFor } from '../search/locationScope';
 import { isSoftSkill } from '../search/xrayTemplates';
 
 // Helper function to safely parse JSON from AI response
@@ -187,6 +188,15 @@ const PLATFORM_ANCHOR: Partial<Record<CandidatePlatform, string>> = {
   MultiSite: '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users)',
 };
 
+/** One line telling the planner exactly what location every query must carry (see the prompt's LOCATION rule). */
+function locationRequirement(constraints: MergedConstraints, terms: QueryTerms): string {
+  const scope = locationScopeFor(constraints);
+  const spellings = terms.location_terms.length ? ` — use ${terms.location_terms.map((x) => `"${x}"`).join(' / ')}` : '';
+  if (scope.kind === 'city') return `CITY: ${scope.label}${spellings}. Profiles listing another city are discarded.`;
+  if (scope.kind === 'country') return `COUNTRY: ${scope.label}${spellings || ' — no place term needed'}. Profiles listing another country are discarded.`;
+  return 'NONE: remote role — add no place terms.';
+}
+
 /** The prompt body for the planner: the requisition, the recruiter's words, orgs, platforms and hints. */
 function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platforms: CandidatePlatform[], details: string): string {
   const softSkills = (constraints.must_have_skills ?? []).filter((sk) => !terms.must_have_skills.includes(sk));
@@ -208,6 +218,7 @@ function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platfo
     `Seniority: ${constraints.seniority}${terms.seniority_term ? ` (headline word: "${terms.seniority_term}")` : ''}`,
     `Experience: ${constraints.years_of_experience?.min ?? 0}–${constraints.years_of_experience?.max ?? 10} years`,
     `Location: ${constraints.location || 'not specified'}${constraints.remote_eligible ? ' — remote eligible' : ''}`,
+    `Location requirement: ${locationRequirement(constraints, terms)}`,
     `Must-have hard skills (searchable): ${terms.must_have_skills.length ? terms.must_have_skills.join(', ') : 'none — anchor on the title and the domain'}`,
     `Soft skills from the JD (never search terms): ${softSkills.join(', ') || 'none'}`,
     `Nice-to-have skills (rank, never require): ${constraints.nice_to_have_skills?.length ? constraints.nice_to_have_skills.join(', ') : 'none'}`,
@@ -396,7 +407,10 @@ export function constraintsFromStructuredJD(structured: StructuredJD, jdText: st
     const city = detectCityInText(jdText);
     if (city) parsed = parseLocation(cityDisplay(city));
   }
-  const remote = structured.location.remote_eligible || parsed.remote || /\b(remote|work from home|wfh|hybrid|distributed)\b/i.test(jdText);
+  // The JD's own words count only when explicit ("fully remote", "work from
+  // home") — not a bare "remote" in prose, and never "hybrid", which needs
+  // someone within commuting distance.
+  const remote = structured.location.remote_eligible || parsed.remote || jdOffersRemote(jdText);
 
   const band = YEARS_BY_SENIORITY[seniority];
   const min = structured.years_of_experience.min ?? band.min;
@@ -598,7 +612,7 @@ export function heuristicParseJD(jdText: string): {
   }
 
   // --- location ------------------------------------------------------------
-  const remoteEligible = /\b(remote|work from home|wfh|hybrid|distributed)\b/i.test(text);
+  const remoteEligible = jdOffersRemote(jdText);
   const city = detectCityInText(jdText);
   const locationPrimary = city ? city.name : null;
   const locationCountry = city ? city.country : null;

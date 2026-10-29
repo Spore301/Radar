@@ -2,6 +2,7 @@ import { CandidatePlatform, CandidateProfile, MergedConstraints, XRayQuery } fro
 import { deduplicateCandidates } from '../utils/deduplication';
 import { isKnownPlatform, normalizePlatform } from './platforms';
 import { indexSerpResult } from './serpIndexer';
+import { locationScopeFor } from './locationScope';
 import { runSerpQuery, SerpApiKeys, SerpOptions, SerpProvider } from './serp';
 
 // ---------------------------------------------------------------------------
@@ -10,10 +11,12 @@ import { runSerpQuery, SerpApiKeys, SerpOptions, SerpProvider } from './serp';
 // Contract:
 //   * Every query in the bundle is searched INDIVIDUALLY (its own SERP call,
 //     its own outcome record) — never merged into one mega-query.
-//   * Every profile the SERP indexed is kept. Relevance is scored and attached
-//     for sorting, but a low score never removes a profile from the result set;
-//     only non-profile URLs (job posts, company pages) and exact-duplicate
-//     profiles are removed.
+//   * Every profile the SERP indexed is kept, with one exception: a profile
+//     whose own result shows it lives outside the requisition's location
+//     (locationScope.ts — "people in Bengaluru" means people in Bengaluru).
+//     Relevance is scored and attached for sorting, but a low score never
+//     removes a profile; otherwise only non-profile URLs (job posts, company
+//     pages) and exact-duplicate profiles are removed.
 //   * Nothing here fetches profile pages or checks liveness: a result that the
 //     search engine has indexed is, by definition, indexed here too.
 // ---------------------------------------------------------------------------
@@ -36,6 +39,8 @@ export interface QueryRunResult {
   error?: string;
   /** The engine's own account of the result set — populated especially when nothing came back. */
   notice?: string;
+  /** Profile-shaped results dropped because they show a location outside the requisition's. */
+  outsideLocation?: number;
 }
 
 export interface SearchStats {
@@ -50,6 +55,8 @@ export interface SearchStats {
   queriesFailed: number;
   /** Total SerpAPI credits spent across the run. */
   creditsUsed: number;
+  /** Profiles dropped across all queries for living outside the requisition's location. */
+  outsideLocation?: number;
 }
 
 export interface XRaySearchResult {
@@ -125,11 +132,20 @@ export async function searchOneQuery(
   try {
     const serp = await runSerpQuery(q.query_string, keys, serpOptions);
     const candidates: CandidateProfile[] = [];
+    let outsideLocation = 0;
     for (const res of serp.results) {
       const cand = indexSerpResult(res, q, constraints, jobId);
-      if (cand) candidates.push(cand);
+      if (!cand) continue;
+      // The location gate: the result itself says this person is elsewhere.
+      if (cand.raw_scraped_data?.location_verdict === 'outside') {
+        outsideLocation++;
+        continue;
+      }
+      candidates.push(cand);
     }
     const failed = serp.provider === 'none';
+    const scope = locationScopeFor(constraints);
+    const notice = [serp.notice, outsideLocation ? `${outsideLocation} outside ${scope.label} dropped` : ''].filter(Boolean).join(' · ') || undefined;
     return {
       outcome: {
         queryId: q.id,
@@ -143,7 +159,8 @@ export async function searchOneQuery(
         pagesFetched: serp.pagesFetched,
         creditsUsed: serp.creditsUsed,
         error: failed ? serp.error : undefined,
-        notice: serp.notice,
+        notice,
+        outsideLocation,
       },
       candidates,
     };
@@ -262,6 +279,7 @@ export async function executeXRaySearch(
       queriesRun: queryResults.filter((r) => r.status === 'completed').length,
       queriesFailed: queryResults.filter((r) => r.status !== 'completed').length,
       creditsUsed: queryResults.reduce((sum, r) => sum + r.creditsUsed, 0),
+      outsideLocation: queryResults.reduce((sum, r) => sum + (r.outsideLocation ?? 0), 0),
     },
     queryResults,
   };

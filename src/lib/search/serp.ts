@@ -132,7 +132,14 @@ async function fetchSerpApiPage(
     .map((item) => ({
       title: String(item.title ?? '').trim(),
       url: item.link as string,
-      snippet: String(item.snippet ?? item.rich_snippet?.top?.extensions?.join(' · ') ?? '').trim(),
+      // For a LinkedIn profile SerpAPI's rich-snippet extensions are usually
+      // ["Bengaluru, Karnataka, India", "Backend Engineer", "Acme"] — the
+      // location the indexer needs. Kept in front of the snippet (it used to
+      // be dropped whenever a snippet existed).
+      snippet: [Array.isArray(item.rich_snippet?.top?.extensions) ? item.rich_snippet.top.extensions.join(' · ') : '', String(item.snippet ?? '')]
+        .map((x: string) => x.trim())
+        .filter(Boolean)
+        .join(' · '),
       thumbnail: typeof item.thumbnail === 'string' ? item.thumbnail : null,
     }));
 

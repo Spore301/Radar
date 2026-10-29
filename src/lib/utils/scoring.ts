@@ -1,5 +1,5 @@
 import { MergedConstraints, MatchBreakdown, CandidateProfile } from '../types';
-import { parseLocation } from '../search/location';
+import { metroOf, parseLocation } from '../search/location';
 import { isSoftSkill } from '../search/xrayTemplates';
 
 // Alternate spellings a profile and a JD commonly disagree on. Both sides are
@@ -35,6 +35,12 @@ export interface ScoringEvidence {
   title?: string;
   /** The SERP snippet — past roles, education, summary. */
   snippet?: string;
+  /**
+   * How the candidate's location was read (serpIndexer.extractLocationEvidence).
+   * 'mention' and 'url' are weaker than a labelled field: a city named in
+   * passing may be a university, so it neither earns full marks nor costs any.
+   */
+  locationSource?: 'field' | 'lead' | 'url' | 'mention' | 'none';
 }
 
 export function calculateRelevanceScore(
@@ -148,20 +154,27 @@ export function calculateRelevanceScore(
 
   // 4. Location / Remote Fit (Max 15)
   //
-  // Alias-aware: "Bangalore" and "Bengaluru, Karnataka, India" are the same
-  // place; same country but a different city is partial credit; an unknown
-  // candidate location is neutral-low rather than a penalty.
+  // Alias- and metro-aware: "Bangalore" and "Greater Bengaluru Area" are the
+  // same place, and Gurugram is Delhi NCR. Same country but a different city
+  // is partial credit; an unknown candidate location is neutral-low rather
+  // than a penalty. A location only mentioned in passing is weak evidence:
+  // it can lift a candidate a little, never sink one. (Profiles that clearly
+  // live elsewhere don't reach scoring — searchOneQuery's location gate drops
+  // them.)
   let location_score = 8;
   const want = parseLocation(constraints.location);
   const have = parseLocation(candidateLocation);
-  const unknown = /not specified/i.test(candidateLocation) || (!have.cities.length && !have.country && !have.remote);
+  const weak = evidence.locationSource === 'mention' || evidence.locationSource === 'url';
+  const unknown = /not specified/i.test(candidateLocation) || (!have.cities.length && !have.countries.length && !have.remote);
+  const sameMetro = want.cities.some((w) => have.cities.some((h) => metroOf(h) === metroOf(w)));
+  const sameCountry = want.countries.some((w) => have.countries.some((h) => h.name === w.name));
   if (constraints.remote_eligible && (have.remote || want.remote)) {
     location_score = 15;
-  } else if (want.cities.length && have.cities.length && want.cities.some((w) => have.cities.some((h) => h.name === w.name))) {
-    location_score = 15;
-  } else if (want.country && have.country && want.country.name === have.country.name) {
-    location_score = 11;
-  } else if (unknown || !want.display) {
+  } else if (sameMetro) {
+    location_score = weak ? 12 : 15;
+  } else if (sameCountry) {
+    location_score = weak ? 9 : 11;
+  } else if (unknown || !want.display || weak) {
     location_score = 8;
   } else {
     location_score = 4;

@@ -40,6 +40,48 @@ The warm-up visit matters. Without Bing's cookies from its home page, the result
   - `auto`: SerpAPI when the user has a key, otherwise the browser.
 - `scripts/free-search-probe.ts` — the harness for comparing result quality across real bundles (see below).
 
+## Location precision (2026-10-30)
+
+A search for people in Bengaluru should return people in Bengaluru. This works the same for every engine (SerpAPI and the browser), with no UI involved. It's driven by the requisition's own location.
+
+**1. Every query names the location.** Templates that didn't include it now get it inserted (`ensureLocation` in `xrayTemplates.ts`). The AI planner's queries go through the same check (`plannedQueries.ts`), which also removes any other place the model wrote: another city, a state ("Karnataka"), or "Remote". The AI can add another spelling of the same city ("Bangalore") but can no longer remove, broaden or move the location. Previously, an empty list from the model wiped it from every query. Country-level roles ("Remote, India") search by the country name. Fully remote roles get no place terms.
+
+**2. Every result is checked against the location** (`locationScope.ts`), using only what the result itself shows. Only strong evidence can remove a profile:
+
+| Evidence (strongest first) | Example | Strength |
+|---|---|---|
+| A labelled location field | `Location: Bengaluru` (also `Locatie:`, `Ort:`, `Lieu:` …) | strong |
+| A snippet that opens with a place | `Bengaluru, Karnataka, India · Backend Engineer` | strong |
+| LinkedIn's country subdomain | `uk.linkedin.com` → United Kingdom | strong, country only |
+| A city mentioned in passing | `Education: IIT Delhi` | weak: never removes anyone |
+
+| Requisition | Kept | Dropped |
+|---|---|---|
+| City ("Bengaluru") | same metro (Gurugram counts for Delhi, Amstelveen for Amsterdam); unknown | another known city, another country |
+| City, remote OK | same country | another country |
+| Country ("Netherlands", "Remote, India", "DACH") | same country | another country |
+| Fully remote | everyone | nobody |
+
+Unknown-location profiles are kept and rank below confirmed matches (location score 15 vs 8). Dropped profiles are counted on each query's receipt ("5 outside Amsterdam dropped").
+
+**3. Inputs fixed along the way.**
+- Hybrid is no longer treated as remote.
+- Multi-city JDs keep every city ("Bengaluru / Hyderabad" used to become "Bengaluru").
+- "NCR" no longer becomes a search term.
+- Same-name places are told apart by country (Cambridge MA vs UK, Hyderabad Pakistan vs India, Amsterdam NY vs NL).
+- The city table grew from 65 to 229 cities (and 24 to 58 countries), with metro groups, so "Rotterdam" can be recognised as not Amsterdam.
+- SerpAPI's rich-snippet location and Bing's fact rows are no longer thrown away.
+- Bing's UK market code is `GB`.
+
+**Measured live (2 queries, 1 page each, headless Bing):**
+- *Product Designer, Amsterdam:* 10 results. 5 dropped, all people who only *mention* Amsterdam: UK ×2, Kenya, Canada, Germany (one was a 2018 Amsterdam internship on a profile now in the UK). 1 confirmed in "Amsterdam Area", 4 kept as unknown.
+- *Backend Engineer (Golang), Bengaluru:* 8 profiles, all `in.linkedin.com`, none dropped. Bing's snippets for these had no `Location:` line, so they're kept as unknown (India) rather than confirmed.
+
+**Known limits.**
+- A profile whose snippet shows no location stays in, ranked lower. That's deliberate, so Bengaluru engineers aren't lost because Bing trimmed a snippet.
+- A town missing from the city table, in the requisition's own country, can't be told apart from a suburb, so it's kept.
+- The LinkedIn subdomain reflects the profile's country as LinkedIn serves it. Someone who moved recently may still be on the old one.
+
 ## How to try it
 
 ```bash

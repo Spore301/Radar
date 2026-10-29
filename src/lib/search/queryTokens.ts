@@ -79,6 +79,49 @@ export function serialize(tokens: QueryToken[]): string {
   return out.replace(/\s{2,}/g, ' ').trim();
 }
 
+/**
+ * Removes the tokens `remove` picks, then tidies what that leaves behind: an
+ * OR / AND / AROUND(n) with nothing on one side, an empty "()" group (and an
+ * operator like intitle: that was applied to it). Removing "Mysuru" from
+ * ("Bengaluru" OR "Mysuru") leaves ("Bengaluru"), not ("Bengaluru" OR ).
+ */
+export function pruneTokens(tokens: QueryToken[], remove: (t: QueryToken) => boolean): QueryToken[] {
+  let out = tokens.filter((t) => !remove(t));
+  const joiner = (t?: QueryToken) => t?.kind === 'bool' || t?.kind === 'proximity';
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const next: QueryToken[] = [];
+    for (let i = 0; i < out.length; i++) {
+      const t = out[i];
+      const prev = next[next.length - 1];
+      const after = out[i + 1];
+      if (joiner(t) && (!prev || prev.kind === 'open' || joiner(prev) || !after || after.kind === 'close' || joiner(after))) {
+        changed = true;
+        continue;
+      }
+      if (t.kind === 'open' && after?.kind === 'close') {
+        if (prev?.kind === 'operator' && /:$/.test(prev.text)) next.pop();
+        i++;
+        changed = true;
+        continue;
+      }
+      next.push(t);
+    }
+    out = next;
+  }
+  return out;
+}
+
+/** Inserts `clause` just before the first exclusion (-term), or at the end — where a query's filters read naturally. */
+export function insertBeforeExclusions(query: string, clause: string): string {
+  if (!clause.trim()) return query;
+  const tokens = tokenize(query);
+  const at = tokens.findIndex((t) => t.kind === 'exclude');
+  const add = tokenize(clause);
+  return serialize(at === -1 ? [...tokens, ...add] : [...tokens.slice(0, at), ...add, ...tokens.slice(at)]);
+}
+
 /** Human label for a token kind, used for palette headings and tooltips. */
 export const KIND_LABEL: Record<TokenKind, string> = {
   operator: 'Operator',

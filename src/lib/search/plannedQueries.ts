@@ -1,8 +1,10 @@
 import type { CandidatePlatform, MergedConstraints, XRayQuery } from '../types';
 import { getPlatformMeta, normalizePlatform, PLATFORM_IDS } from './platforms';
-import { buildQueryBundle, countGoogleWords, GOOGLE_WORD_LIMIT, isGroundedIn, PlannedTier, QueryTerms, withOrgClause } from './xrayTemplates';
+import { buildQueryBundle, countGoogleWords, ensureLocation, GOOGLE_WORD_LIMIT, isGroundedIn, isSamePlace, PlannedTier, QueryTerms, withOrgClause } from './xrayTemplates';
 import { canonicalizeQueryString, DUPLICATE_SIMILARITY_THRESHOLD, querySimilarity, validateQuery } from './queryValidation';
-import { serialize, tokenize } from './queryTokens';
+import { pruneTokens, serialize, tokenize } from './queryTokens';
+import { lookupPlace } from './location';
+import { locationScopeFor, type LocationScope } from './locationScope';
 
 // ---------------------------------------------------------------------------
 // Planned-query gate.
@@ -21,6 +23,9 @@ import { serialize, tokenize } from './queryTokens';
 //                  or it is the standard job-post noise filter;
 //   * orgs       — target organisations must appear (inserted if missing),
 //                  excluded ones must be negated (appended if missing);
+//   * location   — the requisition's location must appear (inserted if
+//                  missing); any other place the model named — another
+//                  city, a state, "Remote" — is removed;
 //   * fairness   — no protected characteristic, in or out;
 //   * spend      — near-duplicates dropped, per-platform and per-run caps.
 //
@@ -129,6 +134,33 @@ function stripUngroundedExclusions(query: string, terms: QueryTerms, details: st
   return { query: removed.length ? serialize(kept) : query, removed };
 }
 
+/**
+ * Removes every place term that isn't the requisition's own location: another
+ * city or a state ("Bengaluru" OR "Karnataka" quietly searches the whole
+ * state), "Remote" (matches nearly every profile), or any place at all for a
+ * remote role. Whole terms only — "Bangalore Tech Labs" is a company, not a
+ * place. Exclusions (-"Mumbai") are left to stripUngroundedExclusions.
+ */
+function stripOffTargetPlaces(query: string, terms: QueryTerms, scope: LocationScope): { query: string; removed: string[] } {
+  const removed: string[] = [];
+  const kept = pruneTokens(tokenize(query), (t) => {
+    if (t.kind !== 'phrase' && t.kind !== 'word') return false;
+    const inner = t.text.replace(/^"|"$/g, '');
+    const place = lookupPlace(inner);
+    if (!place) return false;
+    let offTarget: boolean;
+    if (place.kind === 'remote') offTarget = true;
+    else if (scope.kind === 'none') offTarget = true;
+    else if (isSamePlace(inner, terms.location_terms)) offTarget = false;
+    // The target city's own country narrows nothing away; another country does.
+    else if (place.kind === 'country') offTarget = !scope.countries.some((x) => x.name === place.country.name);
+    else offTarget = true;
+    if (offTarget) removed.push(t.text);
+    return offTarget;
+  });
+  return { query: removed.length ? serialize(kept) : query, removed };
+}
+
 /** Adds the recruiter's organisation constraints the model left out. */
 function enforceOrganisations(query: string, terms: QueryTerms, platform: CandidatePlatform): string {
   let out = query;
@@ -152,6 +184,7 @@ export function acceptPlannedQueries(
   ctx: { constraints: MergedConstraints; terms: QueryTerms; platforms: CandidatePlatform[]; details: string }
 ): { queries: XRayQuery[]; report: PlanReport } {
   const report: PlanReport = { accepted: 0, rejected: [], fallbackPlatforms: [] };
+  const scope = locationScopeFor(ctx.constraints);
   const accepted: Array<XRayQuery & { tierIndex: number }> = [];
   const perPlatform = new Map<CandidatePlatform, number>();
   const reject = (platform: string, query: string, reason: string) => report.rejected.push({ platform, query, reason });
@@ -179,7 +212,9 @@ export function acceptPlannedQueries(
 
     const { query: cleaned, removed } = stripUngroundedExclusions(raw, ctx.terms, ctx.details);
     if (removed.length) console.info(`Planner query on ${platform}: dropped exclusions the recruiter never asked for: ${removed.join(' ')}`);
-    const query = canonicalizeQueryString(enforceOrganisations(cleaned, ctx.terms, platform));
+    const placed = stripOffTargetPlaces(cleaned, ctx.terms, scope);
+    if (placed.removed.length) console.info(`Planner query on ${platform}: dropped places outside the requisition's location: ${placed.removed.join(' ')}`);
+    const query = canonicalizeQueryString(enforceOrganisations(ensureLocation(placed.query, ctx.terms), ctx.terms, platform));
 
     if (countGoogleWords(query) > GOOGLE_WORD_LIMIT) {
       reject(label, query, `${countGoogleWords(query)} words — over Google's ${GOOGLE_WORD_LIMIT}-word limit`);

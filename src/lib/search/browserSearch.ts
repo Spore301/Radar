@@ -180,7 +180,11 @@ async function bingPage(p: BrowserPage, query: string, market: string, first: nu
     const results = Array.from(document.querySelectorAll('li.b_algo')).map((b) => {
       const a = b.querySelector('h2 a') as HTMLAnchorElement | null;
       const s = (b.querySelector('.b_caption p') ?? b.querySelector('p')) as HTMLElement | null;
-      return { url: a?.href ?? '', title: a?.innerText ?? '', snippet: s?.innerText ?? '' };
+      // LinkedIn results carry "Location: …" in Bing's fact rows, outside the caption paragraph.
+      const facts = Array.from(b.querySelectorAll('.b_factrow'))
+        .map((f) => (f as HTMLElement).innerText.trim())
+        .filter(Boolean);
+      return { url: a?.href ?? '', title: a?.innerText ?? '', snippet: [s?.innerText ?? '', ...facts].filter(Boolean).join(' · ') };
     });
     const captcha = Boolean(document.querySelector('#b_captcha, iframe[src*="challenge"], .captcha'));
     const hasNext = Boolean(document.querySelector('a.sb_pagN, a[title="Next page"]'));
@@ -224,7 +228,8 @@ export interface BrowserSearchOutcome {
  */
 export function browserXRaySearch(query: string, opts: { maxPages: number; gl?: string; stopAt?: number }): Promise<BrowserSearchOutcome> {
   return exclusive(async () => {
-    const market = (opts.gl || 'us').toUpperCase();
+    // Bing's market codes are ISO 3166 — the UK is GB, where SerpAPI and LinkedIn say "uk".
+    const market = (opts.gl === 'uk' ? 'gb' : opts.gl || 'us').toUpperCase();
     const seen = new Set<string>();
     const all: RawSearchResult[] = [];
     const absorb = (rows: PageOfResults['results']) => {

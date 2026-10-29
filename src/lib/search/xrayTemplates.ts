@@ -1,6 +1,8 @@
 import { CandidatePlatform, MergedConstraints, SeniorityLevel, XRayQuery } from '../types';
 import { PLATFORM_IDS } from './platforms';
-import { parseLocation } from './location';
+import { lookupPlace, metroOf, parseLocation } from './location';
+import { locationScopeFor } from './locationScope';
+import { insertBeforeExclusions } from './queryTokens';
 
 // ---------------------------------------------------------------------------
 // X-Ray query templates.
@@ -177,6 +179,24 @@ export function locationClause(t: QueryTerms, _includeRemote = false): string {
   return orGroup(uniq(t.location_terms), 3);
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Does the query already name one of these places (any spelling in the list)? */
+export function mentionsLocation(query: string, terms: string[]): boolean {
+  return terms.some((term) => new RegExp(`(?<![\\w-])${escapeRe(term)}(?![\\w-])`, 'i').test(query));
+}
+
+/**
+ * A location-bound requisition's every query names the location. A template
+ * that doesn't build it in gets the location clause inserted before its
+ * exclusions, so no query — today's templates or a future one — can quietly
+ * search the whole world for a Bengaluru role.
+ */
+export function ensureLocation(query: string, t: QueryTerms): string {
+  if (!t.location_terms.length || mentionsLocation(query, t.location_terms)) return query;
+  return insertBeforeExclusions(query, locationClause(t));
+}
+
 /**
  * Recruiter-mandated phrases. Rendered as ONE OR group — a profile page that
  * carries any of them counts. AND'ing several ("BCG" "Bain") demands that a
@@ -249,14 +269,16 @@ function fitToBudget(tpl: XRayTemplate, terms: QueryTerms): string | null {
     (t) => t,
     (t) => ({ ...t, skill_synonyms: {} }),
     (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 3) }),
-    (t) => ({ ...t, location_terms: t.location_terms.slice(0, 1), domain_terms: (t.domain_terms ?? []).slice(0, 2) }),
+    // Location terms are primary names first (location.ts), so two survives as
+    // "both cities" for a two-city role and "name + spelling" for one.
+    (t) => ({ ...t, location_terms: t.location_terms.slice(0, 2), domain_terms: (t.domain_terms ?? []).slice(0, 2) }),
     (t) => ({ ...t, must_have_skills: t.must_have_skills.slice(0, 2) }),
     (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 2), discipline_terms: t.discipline_terms.slice(0, 2), role_adjacent_terms: t.role_adjacent_terms.slice(0, 2) }),
     (t) => ({ ...t, exclude_terms: t.exclude_terms.slice(0, 3), excluded_orgs: (t.excluded_orgs ?? []).slice(0, 2) }),
     (t) => ({ ...t, target_orgs: (t.target_orgs ?? []).slice(0, 4) }),
     (t) => ({ ...t, required_phrases: t.required_phrases.slice(0, 2) }),
     (t) => ({ ...t, target_orgs: (t.target_orgs ?? []).slice(0, 3) }),
-    (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 1), must_have_skills: t.must_have_skills.slice(0, 1) }),
+    (t) => ({ ...t, role_synonyms: t.role_synonyms.slice(0, 1), must_have_skills: t.must_have_skills.slice(0, 1), location_terms: t.location_terms.slice(0, 1) }),
   ];
   let current = terms;
   let built: string | null = null;
@@ -264,7 +286,7 @@ function fitToBudget(tpl: XRayTemplate, terms: QueryTerms): string | null {
     current = step(current);
     const raw = tpl.build(current);
     if (!raw) return null;
-    built = withOrgClause(raw, current, tpl.platform);
+    built = withOrgClause(ensureLocation(raw, current), current, tpl.platform);
     if (countGoogleWords(built) <= GOOGLE_WORD_LIMIT) return built;
   }
   return built;
@@ -358,8 +380,10 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     expected_result_type: 'Profile',
     intent: (t) => `GitHub bios and READMEs mentioning ${t.must_have_skills.slice(0, 3).join(', ') || 'the stack'}.`,
     build: (t) =>
-      !skillsClause(t)
-        ? null // no searchable hard skills — a GitHub sweep on soft skills is noise
+      // No searchable hard skills: a GitHub sweep on soft skills is noise. With a
+      // location, github_location below is this same sweep anchored to it.
+      !skillsClause(t) || t.location_terms.length
+        ? null
         : join(
         'site:github.com',
         skillsClause(t),
@@ -387,7 +411,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'stackoverflow_skills',
     platform: 'StackOverflow',
     label: 'Skill-based user search',
-    pattern: 'site:stackoverflow.com/users ({must-have skills})',
+    pattern: 'site:stackoverflow.com/users ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: (t) => `Stack Overflow users active in ${t.must_have_skills.slice(0, 3).join(', ') || 'the must-have tags'}.`,
     build: (t) => (skillsClause(t) ? join('site:stackoverflow.com/users', skillsClause(t), requiredClause(t), excludeClause(t)) : null),
@@ -396,7 +420,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'stackoverflow_passive',
     platform: 'StackOverflow',
     label: 'Passive-candidate filter',
-    pattern: 'site:stackoverflow.com/users ({must-have skills}) -"looking for job" -hiring',
+    pattern: 'site:stackoverflow.com/users ({must-have skills}) {location} -"looking for job" -hiring',
     expected_result_type: 'Profile',
     intent: () => 'Stack Overflow users with the skills who are not actively advertising a job hunt.',
     build: (t) =>
@@ -419,7 +443,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'behance_discipline',
     platform: 'Behance',
     label: 'Discipline / skill search',
-    pattern: 'site:behance.net ({discipline, e.g. "UI Design" OR "Brand Identity"}) AND ({must-have skills})',
+    pattern: 'site:behance.net ({discipline, e.g. "UI Design" OR "Brand Identity"}) AND ({must-have skills}) {location}',
     expected_result_type: 'Portfolio',
     intent: (t) => `Behance portfolios in ${t.discipline_terms.slice(0, 2).join(' / ') || 'the discipline'}.`,
     build: (t) => join('site:behance.net', orGroup(t.discipline_terms, 4), topicClause(t), requiredClause(t), excludeClause(t)),
@@ -430,7 +454,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'dribbble_discipline',
     platform: 'Dribbble',
     label: 'Discipline / skill search',
-    pattern: 'site:dribbble.com ({discipline}) AND ({must-have skills})',
+    pattern: 'site:dribbble.com ({discipline}) AND ({must-have skills}) {location}',
     expected_result_type: 'Portfolio',
     intent: (t) => `Dribbble designers working in ${t.discipline_terms.slice(0, 2).join(' / ') || 'the discipline'}.`,
     build: (t) => join('site:dribbble.com', orGroup(t.discipline_terms, 4), topicClause(t), requiredClause(t), excludeClause(t)),
@@ -441,7 +465,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'xing_profile',
     platform: 'Xing',
     label: 'DACH region role + skill',
-    pattern: 'site:xing.com/profile ({role synonyms, local language if relevant}) AND ({must-have skills})',
+    pattern: 'site:xing.com/profile ({role synonyms, local language if relevant}) AND ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: (t) => `Xing profiles for ${t.role_synonyms[0] ?? 'the role'} across the DACH region.`,
     build: (t) => join('site:xing.com/profile', rolesClause(t), topicClause(t), requiredClause(t), excludeClause(t)),
@@ -450,7 +474,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'xing_geo',
     platform: 'Xing',
     label: 'Geo-domain variant',
-    pattern: 'site:.de ({role synonyms}) AND ({must-have skills})',
+    pattern: 'site:.de ({role synonyms}) AND ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: (t) => `Country-domain (${t.geo_tld || 'none for this location'}) pages mentioning the role and skills.`,
     build: (t) =>
@@ -481,7 +505,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     id: 'resume_presentations',
     platform: 'Resumes',
     label: 'Presentations / thought-leadership',
-    pattern: '(filetype:ppt OR site:slideshare.net) ({topic/skills}) intitle:({role or conference context})',
+    pattern: '(filetype:ppt OR site:slideshare.net) ({topic/skills}) intitle:({role or conference context}) {location}',
     expected_result_type: 'Portfolio',
     intent: (t) => `Conference decks and SlideShare uploads by practitioners of ${t.must_have_skills[0] ?? 'the topic'}.`,
     build: (t) => join('(filetype:ppt OR site:slideshare.net)', skillsAsTopics(t) || orGroup(t.domain_terms ?? [], 3), requiredClause(t), `intitle:${baseRolesClause(t)}`, excludeClause(t)),
@@ -493,7 +517,7 @@ export const XRAY_TEMPLATES: readonly XRayTemplate[] = [
     platform: 'MultiSite',
     label: 'Combined multi-site pass',
     pattern:
-      '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users) AND ({role synonyms}) AND ({must-have skills})',
+      '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users) AND ({role synonyms}) AND ({must-have skills}) {location}',
     expected_result_type: 'Profile',
     intent: () => 'One lower-precision sweep across LinkedIn, GitHub and Stack Overflow at once.',
     build: (t) =>
@@ -791,7 +815,15 @@ export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
   // One place decides what a location means: spellings a profile would carry,
   // the country domain for the geo sweep, and whether "remote" was said.
   const loc = parseLocation(constraints.location);
-  const location_terms = loc.searchTerms.slice(0, 3);
+  const scope = locationScopeFor(constraints);
+  let location_terms = loc.searchTerms.slice(0, 4);
+  // A country-level role ("Remote, India", "Netherlands") searches by the
+  // country name, which every profile there shows ("Pune, Maharashtra, India").
+  // Not for the US — LinkedIn's US metro labels ("Greater Seattle Area") often
+  // omit the country — and not for a many-country region (Europe, Nordics).
+  if (!location_terms.length && scope.kind === 'country' && scope.countries.length <= 3 && !scope.countries.some((x) => x.code === 'us')) {
+    location_terms = scope.countries.map((x) => x.name);
+  }
   // '.com' (the US) is not a country domain in practice — `site:.com` is the whole web.
   const geo_tld = loc.tld === '.com' ? '' : loc.tld;
   const details = parseAdditionalDetails(constraints.additional_details ?? constraints.soft_constraints);
@@ -842,6 +874,20 @@ export function isGroundedIn(term: string, details: string): boolean {
   return words(term).every((w) => pool.has(stem(w)));
 }
 
+/** Is `term` another name for one of the places in `terms` ("Bangalore" for "Bengaluru")? */
+export function isSamePlace(term: string, terms: string[]): boolean {
+  const k = term.trim().toLowerCase();
+  if (terms.some((x) => x.trim().toLowerCase() === k)) return true;
+  const hit = lookupPlace(term);
+  if (!hit) return false;
+  return terms.some((x) => {
+    const base = lookupPlace(x);
+    if (hit.kind === 'city' && base?.kind === 'city') return metroOf(hit.city) === metroOf(base.city) && hit.city.name === base.city.name;
+    if (hit.kind === 'country' && base?.kind === 'country') return hit.country.name === base.country.name;
+    return false;
+  });
+}
+
 /**
  * Merges AI-supplied vocabulary over the heuristic one. Anything missing,
  * empty or malformed falls back to the grounded heuristic value, and skill
@@ -887,9 +933,15 @@ export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null
     discipline_terms: strList(ai.discipline_terms, 4) ?? base.discipline_terms,
     seniority_term:
       typeof ai.seniority_term === 'string' && ai.seniority_term.trim() ? ai.seniority_term.trim() : base.seniority_term,
-    location_terms: strList(ai.location_terms, 4) ?? base.location_terms,
+    // The location is the recruiter's hard constraint, like the organisations:
+    // the model may add another spelling of the SAME place ("Bangalore"), never
+    // remove it (an empty list used to wipe it from every query), broaden it
+    // ("Karnataka") or move it, and it can't give a remote role a city.
+    location_terms: base.location_terms.length
+      ? uniq([...base.location_terms, ...(strList(ai.location_terms, 6) ?? []).filter((x) => isSamePlace(x, base.location_terms))]).slice(0, 4)
+      : base.location_terms,
     remote: base.remote,
-    geo_tld: typeof ai.geo_tld === 'string' && /^\.[a-z]{2,}(\.[a-z]{2,})?$/i.test(ai.geo_tld.trim()) ? ai.geo_tld.trim().toLowerCase() : base.geo_tld,
+    geo_tld: base.geo_tld,
     // Recruiter intent from the additional details is additive: what the
     // heuristic parser found stays, the model can only sharpen or extend it.
     required_phrases: uniq([...(strList(ai.required_phrases, 3) ?? []), ...base.required_phrases]).slice(0, 3),

@@ -1,7 +1,8 @@
 import { CandidatePlatform, CandidateProfile, MergedConstraints, XRayQuery } from '../types';
 import { calculateRelevanceScore } from '../utils/scoring';
 import { detectPlatformFromUrl } from './platforms';
-import { ANY_CITY_RE, detectCityInText, cityDisplay } from './location';
+import { ANY_CITY_RE, COUNTRY_NAME_RE, cityDisplay, countryOf, countryRef, detectCityInText, isLocationShaped, parseLocation } from './location';
+import { judgeLocation, locationScopeFor, type LocationEvidence } from './locationScope';
 import type { RawSearchResult } from './serp';
 
 // ---------------------------------------------------------------------------
@@ -213,23 +214,75 @@ export function detectSkills(text: string, constraints: MergedConstraints): stri
   return found;
 }
 
-/**
- * LinkedIn snippets start with the profile location ("Bengaluru, Karnataka,
- * India · Senior Product Designer · Acme"); other platforms rarely expose one.
- * Falls back to the shared city table. Never borrows the JD's location — an
- * unknown location must stay unknown so scoring and dedupe don't treat every
- * profile as living where the job is.
- */
-export function detectLocation(snippet: string, fullText: string): string {
-  const lead = snippet.split(/\s[·•|]\s/)[0]?.trim() ?? '';
-  if (lead && lead.length <= 60 && /,/.test(lead) && !/\d/.test(lead) && !/[:]/.test(lead) && /^[A-Z]/.test(lead) && !/\b(years?|experience|skills?|tags?)\b/i.test(lead)) {
-    return lead;
+// LinkedIn's public-profile description, which Google and Bing both show as
+// the snippet, labels the location: "Experience: Acme · Education: IIT Delhi ·
+// Location: Bengaluru · 500+ connections on LinkedIn". Searching from the
+// Netherlands or Germany brings the same line in Dutch or German.
+const LOCATION_LABEL_RE =
+  /(?:^|[\s·•|])(?:location|locatie|ort|standort|lieu|localisation|ubicación|ubicacion|localização|localizacao|località|localita|posizione|lokalizacja|plats|sted|sijainti|konum|lokasi)\s*:\s*([^·•|\n]+)/i;
+const CONNECTIONS_TAIL_RE =
+  /\s+\d[\d,.]*\s*\+?\s*(?:connections?|followers?|connecties|volgers|kontakte|follower|relations|abonnés|contactos|seguidores|conexões|conexoes|collegamenti|połączeń|kontakter|yhteyttä|bağlantı)\b.*$/i;
+const EDUCATION_SEGMENT_RE = /^(?:education|opleiding|ausbildung|formation|educación|educacion|formação|formacao|istruzione|wykształcenie|utbildning)\s*:/i;
+
+/** The value of a labelled "Location:" field, trimmed of what follows it. */
+function labelledLocation(snippet: string): string | null {
+  const m = snippet.match(LOCATION_LABEL_RE);
+  if (!m) return null;
+  const value = m[1]
+    .replace(CONNECTIONS_TAIL_RE, '')
+    .replace(/\s+(?:View|Bekijk|Sehen|Voir|Ver|Visualizza)\s.*$/i, '')
+    .replace(/\.\s.*$/, '')
+    .replace(/[\s.,;:–—-]+$/, '')
+    .trim();
+  return value && value.length <= 80 && !/\d{3,}/.test(value) ? value : null;
+}
+
+/** in.linkedin.com → India. LinkedIn serves public profiles on the member's country subdomain. */
+function linkedInCountry(url: string) {
+  try {
+    const m = new URL(url).hostname.toLowerCase().match(/^([a-z]{2})\.linkedin\.com$/);
+    return m ? countryRef(m[1]) : null;
+  } catch {
+    return null;
   }
-  const city = detectCityInText(fullText);
-  if (city) return cityDisplay(city);
-  if (/\bremote\b/i.test(fullText)) return 'Remote';
-  const country = fullText.match(/\b(india|germany|united kingdom|united states|canada|australia|singapore|netherlands|france)\b/i);
-  return country ? country[1].replace(/\b\w/g, (m) => m.toUpperCase()) : UNKNOWN_LOCATION;
+}
+
+/**
+ * Where does this result say the person is — and how sure is that? In order:
+ *   field   a labelled "Location:" (LinkedIn's own description)          strong
+ *   lead    a snippet that opens with "City, Region, Country"             strong
+ *   url     LinkedIn's country subdomain (country only)                   strong for the country
+ *   mention a city named somewhere in the text, education excluded        weak
+ * Never borrows the JD's location: an unknown location stays unknown, so the
+ * location gate, scoring and dedupe never treat a profile as local by default.
+ */
+export function extractLocationEvidence(result: Pick<RawSearchResult, 'title' | 'snippet' | 'url'>, platform: CandidatePlatform): LocationEvidence {
+  const snippet = result.snippet ?? '';
+  const urlCountry = platform === 'LinkedIn' ? linkedInCountry(result.url) : null;
+
+  const field = labelledLocation(snippet);
+  if (field) {
+    const place = parseLocation(field);
+    if (place.cities.length || place.countries.length || place.unknown.length) return { display: field, source: 'field', place, urlCountry };
+  }
+
+  const lead = snippet.split(/\s[·•|]\s/)[0]?.trim() ?? '';
+  if (isLocationShaped(lead)) return { display: lead, source: 'lead', place: parseLocation(lead), urlCountry };
+
+  const prose = `${result.title ?? ''} · ${snippet
+    .split(/\s[·•|]\s/)
+    .filter((seg) => !EDUCATION_SEGMENT_RE.test(seg.trim()))
+    .join(' · ')}`;
+  const city = detectCityInText(prose);
+  // A passing mention that contradicts the URL's country is the weaker of the two.
+  if (city && !(urlCountry && countryOf(city)?.code !== urlCountry.code)) {
+    return { display: cityDisplay(city), source: 'mention', place: parseLocation(cityDisplay(city)), urlCountry };
+  }
+  if (urlCountry) return { display: urlCountry.name, source: 'url', place: parseLocation(urlCountry.name), urlCountry };
+  if (/\bremote\b/i.test(prose)) return { display: 'Remote', source: 'mention', place: null, urlCountry };
+  const country = prose.match(COUNTRY_NAME_RE);
+  if (country) return { display: country[1], source: 'mention', place: parseLocation(country[1]), urlCountry };
+  return { display: UNKNOWN_LOCATION, source: 'none', place: null, urlCountry };
 }
 
 // Kept for callers that only need a boolean "mentions a city".
@@ -327,7 +380,11 @@ export function indexSerpResult(
   if (name !== PLACEHOLDER_NAME && ORG_TITLE.test(name)) return null;
   const fullText = `${result.title} ${result.snippet}`;
   const skills = detectSkills(fullText, constraints);
-  const location = detectLocation(result.snippet, fullText);
+  const evidence = extractLocationEvidence(result, platform);
+  const location = evidence.display;
+  // The verdict is recorded here and acted on by the caller (searchOneQuery),
+  // which drops 'outside' profiles and counts them on the query's receipt.
+  const { verdict: location_verdict, reason: location_reason } = judgeLocation(evidence, locationScopeFor(constraints));
   const seniority = detectSeniority(headline || result.title);
   const years = detectExperienceYears(result.snippet);
 
@@ -337,7 +394,7 @@ export function indexSerpResult(
     location,
     headline,
     constraints,
-    { title: result.title, snippet: result.snippet }
+    { title: result.title, snippet: result.snippet, locationSource: evidence.source }
   );
 
   // Rough sense of how much the SERP actually told us about this person.
@@ -375,6 +432,9 @@ export function indexSerpResult(
       serp_position: result.position ?? null,
       canonical_url: canonical,
       query_type: query.query_type,
+      location_source: evidence.source,
+      location_verdict,
+      location_reason,
     },
     source_query: query.id,
     scrape_status: 'snippet_only',
