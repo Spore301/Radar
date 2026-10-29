@@ -26,6 +26,23 @@ export interface SerpOptions {
   stopAt?: number;
 }
 
+/**
+ * Which engine answers queries — SEARCH_PROVIDER env:
+ *   'serpapi' (default) · 'browser' (EXPERIMENTAL: no SERP API, headless Bing)
+ *   · 'auto' (SerpAPI with a key, else the browser).
+ */
+export type SearchMode = 'serpapi' | 'browser' | 'auto';
+
+export function searchMode(): SearchMode {
+  const v = typeof process !== 'undefined' ? (process.env?.SEARCH_PROVIDER ?? '').trim().toLowerCase() : '';
+  return v === 'browser' || v === 'auto' ? v : 'serpapi';
+}
+
+/** True when a run cannot proceed without a SerpAPI key (the default mode). */
+export function serpApiKeyRequired(): boolean {
+  return searchMode() === 'serpapi';
+}
+
 /** Google serves 10 organic results per page since it dropped `num=100` (Sept 2025). */
 export const SERP_PAGE_SIZE = 10;
 export const DEFAULT_MAX_PAGES_PER_QUERY = 5;

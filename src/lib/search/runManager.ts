@@ -1,6 +1,6 @@
 import { getDeadline, waitUntil } from '@vercel/functions';
 import { mapWithConcurrency, sanitizeQueries, searchOneQuery, SERP_CONCURRENCY } from './x-raySearchService';
-import { glFromTld, resolveSerpOptions } from './serpConfig';
+import { glFromTld, resolveSerpOptions, serpApiKeyRequired } from './serpConfig';
 import { queryLabel } from './xrayTemplates';
 import { platformLabel } from './platforms';
 import { parseLocation } from './location';
@@ -120,7 +120,7 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
     throw err;
   }
 
-  schedule(runId, input.keys.serpapi);
+  schedule(runId, input.keys.serpapi || null);
   return runId;
 }
 
@@ -170,7 +170,7 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
   }
 
   const serpapi = serpapiKey ?? (work.userId ? await getProviderKey(work.userId, 'serpapi') : null) ?? process.env.SERPAPI_KEY ?? null;
-  if (!serpapi) {
+  if (!serpapi && serpApiKeyRequired()) {
     await failRun(runId, work.jobId, 'No SerpAPI key on file. Add one in Settings, then run the search again.');
     return;
   }
@@ -203,7 +203,7 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
         return;
       }
       await markQueryStart(runId, q.id, `Searching ${platformLabel(q.platform)} · ${queryLabel(q.query_type)}…`).catch(() => {});
-      const { outcome, candidates } = await searchOneQuery(q, work.constraints, work.jobId, { serpapi }, serpOptions);
+      const { outcome, candidates } = await searchOneQuery(q, work.constraints, work.jobId, { serpapi: serpapi ?? null }, serpOptions);
       const tier = outcome.provider === 'serpapi' ? 'precision' : 'free';
       writes = writes.then(() => persistQueryCandidates(work.jobId, runId, tier, candidates)).catch((err) => {
         console.error(`Storing profiles for query ${q.id} of run ${runId} failed:`, err);

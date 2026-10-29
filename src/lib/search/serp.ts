@@ -1,4 +1,4 @@
-import { executePlaywrightXRaySearch } from './playwrightSearch';
+import { browserXRaySearch } from './browserSearch';
 
 // ---------------------------------------------------------------------------
 // SERP provider — runs ONE X-Ray query string against a search engine and
@@ -25,11 +25,11 @@ export interface RawSearchResult {
   position?: number;
 }
 
-export type SerpProvider = 'serpapi' | 'google-headless' | 'duckduckgo-headless' | 'none';
+export type SerpProvider = 'serpapi' | 'bing-headless' | 'google-headless' | 'duckduckgo-headless' | 'none';
 
 export type { SerpEngine, SerpOptions } from './serpConfig';
-export { SERP_PAGE_SIZE, DEFAULT_MAX_PAGES_PER_QUERY, HARD_MAX_PAGES_PER_QUERY, resolveSerpOptions } from './serpConfig';
-import { SERP_PAGE_SIZE, resolveSerpOptions } from './serpConfig';
+export { SERP_PAGE_SIZE, DEFAULT_MAX_PAGES_PER_QUERY, HARD_MAX_PAGES_PER_QUERY, resolveSerpOptions, searchMode } from './serpConfig';
+import { SERP_PAGE_SIZE, resolveSerpOptions, searchMode } from './serpConfig';
 import type { SerpEngine, SerpOptions } from './serpConfig';
 
 export interface SerpQueryOutcome {
@@ -195,18 +195,20 @@ async function searchWithSerpApi(
 }
 
 /**
- * Runs a single query. Order of preference:
- *   1. SerpAPI (when a key is configured) — the metered "SERP index" the
- *      validator and credit estimate are built around, paged to depth.
- *   2. Headless Google, then headless DuckDuckGo, via Playwright — free-tier
- *      fallback, used when there is no key or SerpAPI errored.
+ * Runs a single query. SEARCH_PROVIDER (see serpConfig.searchMode) decides:
+ *   serpapi (default) — SerpAPI, paged to depth; the browser only as a
+ *                       fallback when SerpAPI errors.
+ *   browser           — EXPERIMENTAL, no SERP API at all: Bing in a headless
+ *                       browser, DuckDuckGo if Bing is walled (browserSearch.ts).
+ *   auto              — SerpAPI when there is a key, otherwise the browser.
  */
 export async function runSerpQuery(queryString: string, keys: SerpApiKeys = {}, opts?: SerpOptions): Promise<SerpQueryOutcome> {
   const errors: string[] = [];
   const options = resolveSerpOptions(opts);
 
   const serpKey = keys.serpapi?.trim();
-  if (serpKey) {
+  const mode = searchMode();
+  if (serpKey && mode !== 'browser') {
     // Up to two retries after a short pause: SerpAPI's per-second rate limit
     // and the occasional upstream timeout are transient, and a query that
     // fails here otherwise silently contributes nothing to the run.
@@ -225,10 +227,8 @@ export async function runSerpQuery(queryString: string, keys: SerpApiKeys = {}, 
   }
 
   try {
-    const { results, provider } = await executePlaywrightXRaySearch(queryString);
-    if (results.length > 0 || provider !== 'none') {
-      return { provider, results, pagesFetched: 1, creditsUsed: 0, error: errors[0] };
-    }
+    const out = await browserXRaySearch(queryString, { maxPages: options.maxPagesPerQuery, gl: options.gl, stopAt: options.stopAt });
+    return { provider: out.provider, results: out.results, pagesFetched: out.pagesFetched, creditsUsed: 0, notice: out.notice, error: errors[0] };
   } catch (err: any) {
     errors.push(err?.message || 'Headless search failed');
   }

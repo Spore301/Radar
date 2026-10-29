@@ -4,6 +4,7 @@ import { getSession } from '@/lib/db/sessions';
 import { listRunSnapshots } from '@/lib/db/searchRuns';
 import { getProviderKey } from '@/lib/credentials';
 import { resumeStalledRuns, startSearchRun } from '@/lib/search/runManager';
+import { serpApiKeyRequired } from '@/lib/search/serpConfig';
 
 export const dynamic = 'force-dynamic';
 // The search keeps working after the response (waitUntil in runManager), so
@@ -42,7 +43,8 @@ export async function POST(req: NextRequest) {
   // pays for this run; the platform key is only a fallback. Refusing up front
   // beats nine queries that each silently return nothing.
   const serpapi = (await getProviderKey(session!.user.id, 'serpapi')) ?? process.env.SERPAPI_KEY ?? null;
-  if (!serpapi) {
+  // SEARCH_PROVIDER=browser|auto (experimental) can search without one.
+  if (!serpapi && serpApiKeyRequired()) {
     return NextResponse.json({ error: 'No SerpAPI key on file. Add one in Settings before running a search.' }, { status: 400 });
   }
 
@@ -52,7 +54,7 @@ export async function POST(req: NextRequest) {
       userId: session!.user.id,
       constraints,
       queries,
-      keys: { serpapi, deepseek: apiKeys?.deepseek ?? null },
+      keys: { serpapi: serpapi ?? '', deepseek: apiKeys?.deepseek ?? null },
       serpOptions,
     });
     return NextResponse.json({ runId, queriesTotal: queries.length }, { status: 202 });
