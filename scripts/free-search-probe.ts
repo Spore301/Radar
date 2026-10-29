@@ -9,7 +9,7 @@ process.env.PLAYWRIGHT_CHANNEL = process.env.PLAYWRIGHT_CHANNEL || 'msedge';
 const R = '../src/lib/';
 const { searchOneQuery } = require(R + 'search/x-raySearchService');
 const { generateQueryBundleForConstraints } = require(R + 'ai/client');
-const { closeBrowserSearch, toBingQuery } = require(R + 'search/browserSearch');
+const { closeBrowserSearch, toBingQuery } = require(R + 'search-engines/free-browser-poc/engine');
 const { deduplicateCandidates } = require(R + 'utils/deduplication');
 
 const base = { years_of_experience: { min: 0, max: 10 }, remote_eligible: false, nice_to_have_skills: [], domain: [], education: '', additional_details: '', results_cap: 50 };

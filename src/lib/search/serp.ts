@@ -1,18 +1,18 @@
-import { browserXRaySearch } from './browserSearch';
+import { SEARCH_ENGINES } from '../search-engines/registry';
 
 // ---------------------------------------------------------------------------
-// SERP provider — runs ONE X-Ray query string against a search engine and
-// returns every organic result it indexed. No filtering, no scoring, no
-// profile fetching happens here: the indexer (serpIndexer.ts) decides what a
-// result becomes, and the caller runs each query in the bundle individually.
+// SERP orchestrator — runs ONE X-Ray query string and returns every organic
+// result an engine indexed. No filtering, no scoring, no profile fetching
+// happens here: the indexer (serpIndexer.ts) decides what a result becomes,
+// and the caller runs each query in the bundle individually.
 //
-// Depth: Google stopped honouring `num=100` in September 2025 and now serves
-// 10 organic results per page, so "index every profile the SERP has" means
-// paging. Each query first asks for 100 (free win if Google or the chosen
-// engine ever honours it again), and when only a 10-result page comes back it
-// walks `start=10, 20, …` until a short page, no new URLs, or the page cap.
-// Every page is one SerpAPI credit; the outcome reports pages and credits so
-// the run receipt shows exactly what was spent.
+// This module owns the POLICY (which engine to try, in what order, how to
+// fall back) and the public types every caller shares. The actual fetching —
+// SerpAPI's paging, or the experimental headless-browser search — lives one
+// level up in src/lib/search-engines/<engine>/, each implementing the
+// SearchEngineModule contract (src/lib/search-engines/types.ts). See
+// src/lib/search-engines/README.md for the full pattern, including how to
+// add another engine to test.
 // ---------------------------------------------------------------------------
 
 export interface RawSearchResult {
@@ -29,8 +29,8 @@ export type SerpProvider = 'serpapi' | 'bing-headless' | 'google-headless' | 'du
 
 export type { SerpEngine, SerpOptions } from './serpConfig';
 export { SERP_PAGE_SIZE, DEFAULT_MAX_PAGES_PER_QUERY, HARD_MAX_PAGES_PER_QUERY, resolveSerpOptions, searchMode } from './serpConfig';
-import { SERP_PAGE_SIZE, resolveSerpOptions, searchMode } from './serpConfig';
-import type { SerpEngine, SerpOptions } from './serpConfig';
+import { resolveSerpOptions, searchMode } from './serpConfig';
+import type { SerpOptions } from './serpConfig';
 
 export interface SerpQueryOutcome {
   provider: SerpProvider;
@@ -55,180 +55,31 @@ export interface SerpApiKeys {
   brave?: string | null;
 }
 
-interface SerpApiPage {
-  results: RawSearchResult[];
-  /** True when SerpAPI advertised a next page. */
-  hasNext: boolean;
-  /** Human-readable summary of `search_information` — why the page looks the way it does. */
-  notice?: string;
-}
-
-/**
- * Turns SerpAPI's `search_information` into one short line. This is the only
- * thing that distinguishes "Google genuinely has nothing for this string"
- * from "Google returned results and we dropped them".
- */
-function describeSearchInformation(data: any): string | undefined {
-  const si = data?.search_information ?? {};
-  const parts: string[] = [];
-  if (typeof si.organic_results_state === 'string' && si.organic_results_state.trim()) {
-    parts.push(si.organic_results_state.trim());
-  }
-  if (typeof si.total_results === 'number') {
-    parts.push(`${si.total_results.toLocaleString('en-US')} total results`);
-  }
-  if (typeof si.spelling_fix === 'string' && si.spelling_fix.trim()) {
-    parts.push(`Google corrected the spelling to "${si.spelling_fix.trim()}"`);
-  }
-  if (typeof data?.search_metadata?.status === 'string' && data.search_metadata.status !== 'Success') {
-    parts.push(`status ${data.search_metadata.status}`);
-  }
-  return parts.length ? parts.join(' · ') : undefined;
-}
-
-async function fetchSerpApiPage(
-  queryString: string,
-  apiKey: string,
-  engine: SerpEngine,
-  start: number,
-  num: number,
-  gl = ''
-): Promise<SerpApiPage> {
-  const params = new URLSearchParams({
-    engine,
-    q: queryString,
-    api_key: apiKey,
-    num: String(num),
-    start: String(start),
-    hl: 'en',
-    // Personalisation would make the same query index different profiles from
-    // run to run; pin it off. Google's duplicate filter stays ON — the "similar"
-    // results it hides are overwhelmingly low-quality duplicates, not profiles.
-    safe: 'off',
-    // Search from the requisition's country so local profiles rank first.
-    ...(gl ? { gl } : {}),
-  });
-
-  const res = await fetch(`https://serpapi.com/search.json?${params.toString()}`, {
-    // SerpAPI runs a live Google search per call; 20–40 s is normal under load.
-    signal: AbortSignal.timeout(55_000),
-  });
-  if (!res.ok) {
-    throw new Error(`SerpAPI HTTP ${res.status}`);
-  }
-  const data = await res.json();
-  if (data.error) {
-    // SerpAPI reports "Google hasn't returned any results for this query." as
-    // an error string on empty pages; that's an empty page, not a failure.
-    if (/hasn't returned any results/i.test(String(data.error))) {
-      return { results: [], hasNext: false };
-    }
-    throw new Error(`SerpAPI: ${data.error}`);
-  }
-
-  const organic: any[] = Array.isArray(data.organic_results) ? data.organic_results : [];
-  const results = organic
-    .filter((item) => item && typeof item.link === 'string' && item.link.startsWith('http'))
-    .map((item) => ({
-      title: String(item.title ?? '').trim(),
-      url: item.link as string,
-      snippet: String(item.snippet ?? item.rich_snippet?.top?.extensions?.join(' · ') ?? '').trim(),
-      thumbnail: typeof item.thumbnail === 'string' ? item.thumbnail : null,
-    }));
-
-  return {
-    results,
-    hasNext: Boolean(data.serpapi_pagination?.next || data.pagination?.next),
-    notice: describeSearchInformation(data),
-  };
-}
-
-/**
- * Walks every page of one query on SerpAPI. Stops as soon as a page is short,
- * adds nothing new, or the cap is hit — so a query with 23 real results costs
- * 3 credits, not maxPages.
- */
-async function searchWithSerpApi(
-  queryString: string,
-  apiKey: string,
-  options: Required<SerpOptions>
-): Promise<Omit<SerpQueryOutcome, 'provider' | 'error'>> {
-  const seen = new Set<string>();
-  const all: RawSearchResult[] = [];
-  let pages = 0;
-
-  const absorb = (page: RawSearchResult[]): number => {
-    let added = 0;
-    for (const r of page) {
-      const key = r.url.toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '');
-      if (seen.has(key)) continue;
-      seen.add(key);
-      all.push({ ...r, position: all.length + 1 });
-      added++;
-    }
-    return added;
-  };
-
-  // Page 1. Google caps organic results at 10 per page since it dropped num=100;
-  // asking for more only routes the request onto its slow path and times out.
-  const first = await fetchSerpApiPage(queryString, apiKey, options.engine, 0, SERP_PAGE_SIZE, options.gl);
-  const notice = first.notice;
-  pages = 1;
-  absorb(first.results);
-  // Page counts wobble (9 or 11 with filter=0), so "more than a page" is the
-  // only length signal we trust; otherwise SerpAPI's own next-page link decides.
-  if (first.results.length > SERP_PAGE_SIZE || first.results.length === 0 || !first.hasNext) {
-    return { results: all, pagesFetched: pages, creditsUsed: pages, notice };
-  }
-
-  // Google gave one ~10-result page: walk the rest with `start`.
-  while (pages < options.maxPagesPerQuery) {
-    // Under an invocation deadline, keep what we have rather than be killed mid-page.
-    if (options.stopAt && Date.now() > options.stopAt) break;
-    const page = await fetchSerpApiPage(queryString, apiKey, options.engine, pages * SERP_PAGE_SIZE, SERP_PAGE_SIZE, options.gl);
-    pages++;
-    const added = absorb(page.results);
-    if (added === 0 || !page.hasNext) break;
-  }
-
-  return { results: all, pagesFetched: pages, creditsUsed: pages, notice };
-}
-
 /**
  * Runs a single query. SEARCH_PROVIDER (see serpConfig.searchMode) decides:
- *   serpapi (default) — SerpAPI, paged to depth; the browser only as a
- *                       fallback when SerpAPI errors.
- *   browser           — EXPERIMENTAL, no SERP API at all: Bing in a headless
- *                       browser, DuckDuckGo if Bing is walled (browserSearch.ts).
- *   auto              — SerpAPI when there is a key, otherwise the browser.
+ *   serpapi (default) — the production engine (SerpAPI), paged to depth; the
+ *                       experimental engine only as a fallback when it errors.
+ *   browser           — EXPERIMENTAL, no SERP API at all: see
+ *                       src/lib/search-engines/free-browser-poc/.
+ *   auto              — the production engine when there is a key, otherwise
+ *                       the experimental one.
  */
 export async function runSerpQuery(queryString: string, keys: SerpApiKeys = {}, opts?: SerpOptions): Promise<SerpQueryOutcome> {
   const errors: string[] = [];
   const options = resolveSerpOptions(opts);
-
-  const serpKey = keys.serpapi?.trim();
   const mode = searchMode();
-  if (serpKey && mode !== 'browser') {
-    // Up to two retries after a short pause: SerpAPI's per-second rate limit
-    // and the occasional upstream timeout are transient, and a query that
-    // fails here otherwise silently contributes nothing to the run.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const paged = await searchWithSerpApi(queryString, serpKey, options);
-        return { provider: 'serpapi', ...paged };
-      } catch (err: any) {
-        const message = /timeout|aborted/i.test(String(err?.name || err?.message))
-          ? 'SerpAPI did not answer within 55 s'
-          : err?.message || 'SerpAPI failed';
-        errors.push(attempt === 0 ? message : `${message} (retry ${attempt})`);
-        if (attempt < 2) await new Promise((r) => setTimeout(r, (attempt + 1) * 2000 + Math.random() * 1000));
-      }
+
+  if (keys.serpapi?.trim() && mode !== 'browser') {
+    try {
+      return await SEARCH_ENGINES.production.run(queryString, keys, options);
+    } catch (err: any) {
+      errors.push(err?.message || 'SerpAPI failed');
     }
   }
 
   try {
-    const out = await browserXRaySearch(queryString, { maxPages: options.maxPagesPerQuery, gl: options.gl, stopAt: options.stopAt });
-    return { provider: out.provider, results: out.results, pagesFetched: out.pagesFetched, creditsUsed: 0, notice: out.notice, error: errors[0] };
+    const out = await SEARCH_ENGINES['free-browser-poc'].run(queryString, keys, options);
+    return { ...out, error: errors[0] };
   } catch (err: any) {
     errors.push(err?.message || 'Headless search failed');
   }

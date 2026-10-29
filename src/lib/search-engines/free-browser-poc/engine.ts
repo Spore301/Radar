@@ -1,9 +1,14 @@
-import type { RawSearchResult, SerpProvider } from './serp';
+import type { RawSearchResult, SerpProvider } from '../../search/serp';
+import type { SearchEngineModule } from '../types';
 
 // ---------------------------------------------------------------------------
-// EXPERIMENTAL (branch feat/free-search-poc) — X-Ray search with no SERP API.
+// EXPERIMENTAL search engine — X-Ray search with no SERP API.
 //
-// What was measured before this was written (see SEARCH_FREE_POC.md):
+// One subfolder of src/lib/search-engines/ per engine under test; see the
+// README next to this file, and src/lib/search-engines/README.md for the
+// pattern every engine implements.
+//
+// What was measured before this was written (see README.md in this folder):
 //   * plain HTTP requests to DuckDuckGo, Brave, Mojeek, Startpage and Yahoo
 //     are challenged or refused; Bing over plain HTTP answers 200 but silently
 //     ignores the query and returns unrelated pages;
@@ -270,3 +275,18 @@ export function browserXRaySearch(query: string, opts: { maxPages: number; gl?: 
     }
   });
 }
+
+/** The SearchEngineModule wrapper the registry (src/lib/search-engines/registry.ts) sees. */
+export const freeBrowserPocEngine: SearchEngineModule = {
+  id: 'free-browser-poc',
+  label: 'Free browser search (Bing, no SERP API)',
+  status: 'experimental',
+  requiresApiKey: false,
+  description:
+    'EXPERIMENTAL — X-Ray search via a headless Bing session, no paid API and 0 credits spent. Measured results and risks are in README.md in this folder. Scraping a search engine\'s result pages is against its terms of service; this is for evaluating result quality, not a production path.',
+
+  async run(query, _keys, options) {
+    const out = await browserXRaySearch(query, { maxPages: options.maxPagesPerQuery, gl: options.gl, stopAt: options.stopAt });
+    return { provider: out.provider, results: out.results, pagesFetched: out.pagesFetched, creditsUsed: 0, notice: out.notice };
+  },
+};
