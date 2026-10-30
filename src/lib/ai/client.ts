@@ -17,6 +17,7 @@ import { buildQueryBundle, deriveQueryTerms, mergeQueryTerms, QueryTerms } from 
 import { getPlatformMeta, normalizePlatform } from '../search/platforms';
 import { acceptPlannedQueries, PLANNED_CAP, PLANNED_MAX_TOTAL, PlannerAnalysis, PlannerOutput, PlanReport } from '../search/plannedQueries';
 import { parseLocation, detectCityInText, cityDisplay, jdOffersRemote } from '../search/location';
+import { cleanJobTitle } from '../search/jobTitle';
 import { locationScopeFor } from '../search/locationScope';
 import { isSoftSkill } from '../search/xrayTemplates';
 
@@ -213,7 +214,7 @@ function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platfo
 
   return [
     '<REQUISITION>',
-    `Job title: ${constraints.job_title}`,
+    `Job title: ${cleanJobTitle(constraints.job_title)}`,
     `Role type: ${constraints.role_type}`,
     `Seniority: ${constraints.seniority}${terms.seniority_term ? ` (headline word: "${terms.seniority_term}")` : ''}`,
     `Experience: ${constraints.years_of_experience?.min ?? 0}–${constraints.years_of_experience?.max ?? 10} years`,
@@ -407,10 +408,11 @@ export function constraintsFromStructuredJD(structured: StructuredJD, jdText: st
     const city = detectCityInText(jdText);
     if (city) parsed = parseLocation(cityDisplay(city));
   }
-  // The JD's own words count only when explicit ("fully remote", "work from
-  // home") — not a bare "remote" in prose, and never "hybrid", which needs
-  // someone within commuting distance.
-  const remote = structured.location.remote_eligible || parsed.remote || jdOffersRemote(jdText);
+  // The JD's own words decide. Explicit remote phrasing ("fully remote", "work
+  // from home") counts; "hybrid" or "on-site" overrules a model that read
+  // either as remote — those roles need someone within commuting distance.
+  const statesOnsite = /\b(hybrid|on[\s-]?site|in[\s-]office|work(?:ing)?\s+from\s+(?:the\s+|our\s+)?office)\b/i.test(jdText);
+  const remote = jdOffersRemote(jdText) || ((structured.location.remote_eligible || parsed.remote) && !statesOnsite);
 
   const band = YEARS_BY_SENIORITY[seniority];
   const min = structured.years_of_experience.min ?? band.min;
@@ -431,7 +433,7 @@ export function constraintsFromStructuredJD(structured: StructuredJD, jdText: st
   }
 
   return {
-    job_title: structured.job_title ?? '',
+    job_title: cleanJobTitle(structured.job_title),
     role_type: roleType,
     seniority,
     years_of_experience: { min, max },

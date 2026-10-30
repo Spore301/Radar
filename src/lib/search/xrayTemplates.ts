@@ -1,6 +1,7 @@
 import { CandidatePlatform, MergedConstraints, SeniorityLevel, XRayQuery } from '../types';
 import { PLATFORM_IDS } from './platforms';
 import { lookupPlace, metroOf, parseLocation } from './location';
+import { cleanJobTitle } from './jobTitle';
 import { locationScopeFor } from './locationScope';
 import { insertBeforeExclusions } from './queryTokens';
 
@@ -801,7 +802,7 @@ function deriveDomainTerms(title: string, domain: string[]): string[] {
 
 /** Grounded, deterministic vocabulary built purely from the confirmed constraints. */
 export function deriveQueryTerms(constraints: MergedConstraints): QueryTerms {
-  const title = (constraints.job_title || 'Software Engineer').trim();
+  const title = cleanJobTitle(constraints.job_title) || 'Software Engineer';
   const seniority = constraints.seniority || 'Any';
   const mustHave = uniq((constraints.must_have_skills || []).filter((sk) => !isSoftSkill(sk)));
   const domain_terms = deriveDomainTerms(title, constraints.domain || []);
@@ -921,7 +922,7 @@ export function mergeQueryTerms(base: QueryTerms, ai: Partial<QueryTerms> | null
     }
   }
 
-  const roleSyn = strList(ai.role_synonyms, 6);
+  const roleSyn = strList(ai.role_synonyms, 6)?.map(cleanJobTitle).filter(Boolean);
   const roles = roleSyn && roleSyn.length >= 2 ? uniq([base.role_synonyms[0], ...roleSyn]).slice(0, 6) : base.role_synonyms;
 
   return {

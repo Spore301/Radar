@@ -9,6 +9,8 @@ RULES — you must follow every one of these:
    Do NOT infer, guess, or generate information that is not present.
 2. If a field cannot be determined with confidence >= 0.70 from the text,
    set it to null and add it to extraction_warnings[].
+2b. job_title is the role only, as a person would write it in their own headline: "Lead Product Designer, Bangalore
+   (Hybrid)" → "Lead Product Designer". Leave out the location, work mode, employment type and company.
 3. For skills.must_have and skills.nice_to_have, include ONLY skills mentioned by name or clear direct implication (e.g. "build React components" -> React). Do NOT add adjacent skills the JD does not mention.
    skills.must_have is for SEARCHABLE hard skills only: tools, languages, frameworks, platforms, certifications, methods, domains
    (e.g. Python, Figma, Kubernetes, SQL, "prompt engineering", "LLM fine-tuning", CFA). Soft skills and competencies
