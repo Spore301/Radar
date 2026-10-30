@@ -130,7 +130,10 @@ const REGION_GROUPS: Array<{ match: RegExp; cities: string[]; label: string; cou
   { match: /\b(bay area|silicon valley)\b/i, cities: ['San Francisco'], label: 'Bay Area', country: 'United States' },
 ];
 
-const REMOTE_RE = /\b(remote|work from home|wfh|distributed|anywhere|hybrid)\b/i;
+// Hybrid and on-site are not remote: they need someone within commuting
+// distance. Both are still stripped before the place is read.
+const REMOTE_RE = /\b(remote|work from home|wfh|distributed|anywhere)\b/i;
+const WORK_MODE_RE = /\b(remote|work from home|wfh|distributed|anywhere|hybrid|on-?site|in[- ]office|wfo)\b/gi;
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const cityAliasIndex: Array<{ re: RegExp; city: KnownCity }> = CITIES.flatMap((city) =>
@@ -159,7 +162,7 @@ export interface ParsedLocation {
   cities: KnownCity[];
   /** Best single country (from the first city, or an explicit country word). */
   country: CountryInfo | null;
-  /** True when the text says remote / hybrid / WFH. */
+  /** True when the text says remote / WFH / distributed — never for hybrid. */
   remote: boolean;
   /** Free text that matched no table — kept so an unknown town still becomes a query term. */
   unknown: string[];
@@ -205,7 +208,7 @@ export function parseLocation(raw: string | null | undefined): ParsedLocation {
 
   // Split on the separators JDs use for multi-location roles.
   const segments = text
-    .replace(REMOTE_RE, ' ')
+    .replace(WORK_MODE_RE, ' ')
     .split(/\s*(?:[\/,|;()]|\bor\b|\band\b|&|\+)\s*/i)
     .map((s) => s.trim())
     .filter(Boolean);
@@ -266,6 +269,21 @@ export function detectCityInText(text: string): KnownCity | null {
 /** "Bengaluru, Karnataka, India" or "Kolkata, India" for display. */
 export function cityDisplay(city: KnownCity): string {
   return [city.name, city.country].join(', ');
+}
+
+/**
+ * Does a JD's text offer remote work? Explicit phrasings only, and not when
+ * negated ("no remote", "not remote"). Bare "remote" in prose ("remote
+ * monitoring", "remote teams") and "hybrid" do not count.
+ */
+export function jdOffersRemote(text: string): boolean {
+  const re =
+    /\b(fully[\s-]remote|100%\s*remote|remote[\s-](?:first|friendly|eligible|ok|okay|role|position|job|opportunity|company|culture)|work(?:ing)?\s+remotely|work\s+from\s+(?:home|anywhere)|wfh|distributed\s+team|location\s*:\s*remote|remote\s*\([^)]{2,30}\))/gi;
+  for (const m of text.matchAll(re)) {
+    const before = text.slice(Math.max(0, (m.index ?? 0) - 30), m.index ?? 0);
+    if (!/\b(no|not|non|isn'?t|cannot|can'?t|never)\b[^.]*$/i.test(before)) return true;
+  }
+  return false;
 }
 
 /** Do two location strings refer to the same city (any alias)? Used by scoring. */

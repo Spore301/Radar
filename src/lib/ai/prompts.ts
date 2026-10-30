@@ -9,6 +9,8 @@ RULES — you must follow every one of these:
    Do NOT infer, guess, or generate information that is not present.
 2. If a field cannot be determined with confidence >= 0.70 from the text,
    set it to null and add it to extraction_warnings[].
+2b. job_title is the role only, as a person would write it in their own headline: "Lead Product Designer, Bangalore
+   (Hybrid)" → "Lead Product Designer". Leave out the location, work mode, employment type and company.
 3. For skills.must_have and skills.nice_to_have, include ONLY skills mentioned by name or clear direct implication (e.g. "build React components" -> React). Do NOT add adjacent skills the JD does not mention.
    skills.must_have is for SEARCHABLE hard skills only: tools, languages, frameworks, platforms, certifications, methods, domains
    (e.g. Python, Figma, Kubernetes, SQL, "prompt engineering", "LLM fine-tuning", CFA). Soft skills and competencies
@@ -16,8 +18,9 @@ RULES — you must follow every one of these:
    must_have — put them in nice_to_have. A consulting or management JD with no hard skills should have an EMPTY must_have and
    a rich domain[] (e.g. ["Artificial Intelligence", "Generative AI", "Enterprise consulting"]).
 3b. location.primary is the city/region exactly as the JD states it ("Kolkata", "Bengaluru / Hyderabad", "NCR"); location.country
-   is the country when stated or unambiguous from the city, else null. remote_eligible is true only if the JD says remote,
-   hybrid, WFH or distributed. Never invent a location.
+   is the country when stated or unambiguous from the city, else null. remote_eligible is true only if the JD says the
+   role can be done remotely (remote, WFH, work from anywhere, distributed). Hybrid and on-site roles are NOT remote:
+   set false — the candidate must live within commuting distance. Never invent a location.
 3c. target_organizations: companies or institutions the JD names as REQUIRED or strongly preferred backgrounds — "ex-McKinsey",
    "from a FAANG company" (expand to the named companies only if the JD names them; otherwise keep "FAANG"), "IIT/IIM graduates",
    "Big 4 experience". Use the names as written, one per entry. NEVER include the hiring company itself, its parents, clients or
@@ -301,7 +304,8 @@ RULES
    seniority.
 2. must_have_skills are SEARCHABLE hard skills only (tools, languages, platforms, methods). Soft skills
    (communication, leadership, ownership…) go to nice_to_have_skills.
-3. Location is the city or region as said ("Kolkata", "Bengaluru / Hyderabad", "Remote, India").
+3. Location is the city or region as said ("Kolkata", "Bengaluru / Hyderabad", "Remote, India"). Hybrid and on-site
+   are NOT remote: remote_eligible is true only when the recruiter says the role can be done remotely.
 3b. Organisations: "people from Google or Meta" → target_organizations ["Google","Meta"]; "currently at" /
    "working at" → organization_scope "current"; "ex-", "worked at", "alumni of", "from IIT" → "any". "Not from
    Infosys", "avoid our clients X and Y" → excluded_organizations. Never put a company name in additional_details.
