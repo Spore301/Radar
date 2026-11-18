@@ -221,9 +221,13 @@ export function validateQuery(query: XRayQuery, _constraints: MergedConstraints)
     if (GEO_TLD_RE.test(host)) {
       if (!platformMeta.allowGeoTld) {
         err('SITE_NOT_ALLOWED', `"site:${host}" is a bare country domain — only the Xing geo-domain variant may use one.`);
+      } else if (/^\.(com|net|org|io)$/i.test(host)) {
+        err('SITE_NOT_ALLOWED', `"site:${host}" is not a country domain — it scopes nothing but the open web.`);
       }
       continue;
     }
+    // Country hosts (in.linkedin.com, www.linkedin.com, uk.linkedin.com …) are
+    // subdomains of an allowed host and pass the check below.
     if (!HOSTNAME_RE.test(host)) {
       err('MALFORMED_SITE', `"site:${value}" doesn't look like a valid hostname.`);
       continue;

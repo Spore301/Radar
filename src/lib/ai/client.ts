@@ -30,7 +30,7 @@ function tryParseJSON<T>(text: string): T | null {
   try {
     return JSON.parse(cleaned) as T;
   } catch {
-    // A thinking model occasionally wraps the object in a sentence; take the outermost {...}.
+    // The model occasionally wraps the object in a sentence; take the outermost {...}.
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start === -1 || end <= start) return null;
@@ -42,52 +42,29 @@ function tryParseJSON<T>(text: string): T | null {
   }
 }
 
-// --- Models ----------------------------------------------------------------
+// --- Model -----------------------------------------------------------------
 //
-// DeepSeek's current API serves `deepseek-v4-pro` and `deepseek-flash`; the
-// old `deepseek-chat` id is no longer documented. Two profiles:
-//   * 'reasoning' — query planning, where the model has to think about how a
-//     requisition maps onto Google operators and platforms: V4 Pro with
-//     thinking on.
-//   * 'standard'  — extraction, the agent's turn, outreach copy: V4 Pro with
-//     thinking off, for latency.
-// Both are overridable by env, and a rejected model id falls back to Flash so
-// a renamed model degrades quality instead of silently disabling the AI.
+// Every call (JD extraction, query planning, the agent's turn, outreach copy)
+// uses `deepseek-chat` in JSON mode at temperature 0.1. DEEPSEEK_MODEL
+// overrides the model id.
 
-export type DeepSeekProfile = 'standard' | 'reasoning';
-
-const FALLBACK_MODEL = 'deepseek-flash';
-
-function modelFor(profile: DeepSeekProfile): { model: string; thinking: boolean; effort: string } {
-  if (profile === 'reasoning') {
-    return {
-      model: process.env.DEEPSEEK_REASONING_MODEL || 'deepseek-v4-pro',
-      thinking: process.env.DEEPSEEK_REASONING_THINKING !== 'off',
-      effort: process.env.DEEPSEEK_REASONING_EFFORT || 'high',
-    };
-  }
-  return { model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro', thinking: false, effort: 'low' };
-}
+const DEFAULT_MODEL = 'deepseek-chat';
 
 /**
  * DeepSeek AI API Call Handler. Returns the parsed JSON object from the
- * model's answer (the chain of thought, in `reasoning_content`, is dropped).
+ * model's answer, or null when the call fails or the answer isn't JSON.
  */
 export async function callDeepSeekAPI<T>(
   userPrompt: string,
   systemPrompt: string,
   apiKey: string,
-  options: { timeoutMs?: number; retries?: number; profile?: DeepSeekProfile } = {}
+  options: { timeoutMs?: number; retries?: number } = {}
 ): Promise<T | null> {
-  const profile = options.profile ?? 'standard';
-  const cfg = modelFor(profile);
-  // Thinking takes a while; a planning call is worth waiting for.
-  const timeoutMs = options.timeoutMs ?? (cfg.thinking ? 200_000 : 90_000);
+  const model = process.env.DEEPSEEK_MODEL || DEFAULT_MODEL;
+  const timeoutMs = options.timeoutMs ?? 90_000;
   const retries = options.retries ?? 1;
-  let model = cfg.model;
-  let jsonMode = true;
 
-  for (let attempt = 0; attempt <= retries + 2; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
@@ -101,9 +78,11 @@ export async function callDeepSeekAPI<T>(
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          thinking: { type: cfg.thinking ? 'enabled' : 'disabled' },
-          ...(cfg.thinking ? { reasoning_effort: cfg.effort } : { temperature: 0.1 }),
-          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+          temperature: 0.1,
+          // The planner's answer (analysis, vocabulary, up to 14 queries) can
+          // pass the 4K default; a truncated answer isn't valid JSON.
+          max_tokens: 8192,
+          response_format: { type: 'json_object' },
         }),
         // A hung model call used to hold the route open until the platform
         // killed it, which surfaced to recruiters as an opaque timeout.
@@ -113,16 +92,6 @@ export async function callDeepSeekAPI<T>(
       if (!res.ok) {
         const errText = await res.text();
         console.error(`DeepSeek API Error (${model}):`, res.status, errText.slice(0, 500));
-        // An unknown / retired model id: fall back once rather than lose the AI.
-        if ((res.status === 400 || res.status === 404) && /model/i.test(errText) && model !== FALLBACK_MODEL) {
-          model = FALLBACK_MODEL;
-          continue;
-        }
-        // JSON mode not accepted alongside thinking: ask again without it (the prompt still demands JSON).
-        if (res.status === 400 && /response_format|json/i.test(errText) && jsonMode) {
-          jsonMode = false;
-          continue;
-        }
         if (res.status >= 500 && attempt < retries) continue;
         return null;
       }
@@ -133,8 +102,7 @@ export async function callDeepSeekAPI<T>(
     } catch (err: any) {
       const timedOut = /timeout|aborted/i.test(String(err?.name || err?.message));
       console.error(`DeepSeek API exception (${model})${timedOut ? ' (timeout)' : ''}:`, err?.message || err);
-      // A timed-out thinking call won't go faster on a retry.
-      if (attempt < retries && !(timedOut && cfg.thinking)) {
+      if (attempt < retries) {
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
@@ -180,13 +148,37 @@ export interface QueryPlan {
   report: PlanReport | null;
 }
 
-const PLATFORM_ANCHOR: Partial<Record<CandidatePlatform, string>> = {
-  LinkedIn: 'site:linkedin.com/in/',
-  StackOverflow: 'site:stackoverflow.com/users',
-  Xing: 'site:xing.com/profile (or a DACH country TLD such as site:.de)',
-  Resumes: 'filetype:pdf, filetype:ppt or site:slideshare.net',
-  MultiSite: '(site:linkedin.com/in/ OR site:github.com OR site:stackoverflow.com/users)',
-};
+/** The anchor each platform's queries must use; LinkedIn's carries the role's country host. */
+function platformAnchor(platform: CandidatePlatform, terms: QueryTerms): string | undefined {
+  const linkedin = `site:${terms.linkedin_host || 'linkedin.com'}/in/`;
+  switch (platform) {
+    case 'LinkedIn':
+      return linkedin;
+    case 'StackOverflow':
+      return 'site:stackoverflow.com/users';
+    case 'Xing':
+      return 'site:xing.com/profile (or a DACH country TLD such as site:.de)';
+    case 'Resumes':
+      return 'filetype:pdf, filetype:ppt or site:slideshare.net';
+    case 'MultiSite':
+      return `(${linkedin} OR site:github.com OR site:stackoverflow.com/users)`;
+    default:
+      return undefined;
+  }
+}
+
+/** One line for the planner on how LinkedIn geography is pinned for this role. */
+function linkedinGeographyHint(terms: QueryTerms): string {
+  const host = terms.linkedin_host || 'linkedin.com';
+  const where =
+    host === 'linkedin.com'
+      ? 'no single country — use site:linkedin.com/in/'
+      : host === 'www.linkedin.com'
+        ? 'United States — US profiles live on www.linkedin.com; use site:www.linkedin.com/in/'
+        : `${terms.country} — use site:${host}/in/ on every LinkedIn query`;
+  const city = terms.location_terms.length ? `; every LinkedIn query must also carry the city clause ${terms.location_terms.slice(0, 2).map((t) => `"${t}"`).join(' OR ')}` : '';
+  return `${where}${city}. RADR. rewrites the host and appends the city if a query leaves them out.`;
+}
 
 /** The prompt body for the planner: the requisition, the recruiter's words, orgs, platforms and hints. */
 function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platforms: CandidatePlatform[], details: string): string {
@@ -194,7 +186,7 @@ function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platfo
   const platformLines = platforms
     .map((p) => {
       const meta = getPlatformMeta(p);
-      const anchor = PLATFORM_ANCHOR[p] ?? meta.hosts.map((h) => `site:${h}`).join(' or ');
+      const anchor = platformAnchor(p, terms) ?? meta.hosts.map((h) => `site:${h}`).join(' or ');
       return `- ${p} (max ${PLANNED_CAP[p]} queries): ${anchor} — ${meta.description}`;
     })
     .join('\n');
@@ -231,6 +223,8 @@ function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platfo
     '',
     '<HINTS>',
     `Location spellings: ${terms.location_terms.length ? terms.location_terms.join(', ') : '(none)'}`,
+    `Country: ${terms.country || '(none or several)'}${terms.country_terms?.length ? ` — with no city, use ${terms.country_terms.map((t) => `"${t}"`).join(' / ')} as the location term outside LinkedIn` : ''}`,
+    `LinkedIn geography: ${linkedinGeographyHint(terms)}`,
     `Country TLD: ${terms.geo_tld || '(none)'}`,
     `Exclusions already parsed from the details: ${terms.exclude_terms.length ? terms.exclude_terms.join(', ') : '(none)'}`,
     `Required phrases already parsed from the details: ${terms.required_phrases.length ? terms.required_phrases.join(', ') : '(none)'}`,
@@ -240,8 +234,7 @@ function plannerPrompt(constraints: MergedConstraints, terms: QueryTerms, platfo
 }
 
 /**
- * Plans the X-Ray bundle with the reasoning model. DeepSeek V4 Pro (thinking)
- * analyses the requisition and writes a precision → balanced → recall ladder
+ * Plans the X-Ray bundle with DeepSeek. The model analyses the requisition and writes a precision → balanced → recall ladder
  * of queries per platform; acceptPlannedQueries() then validates every one of
  * them against the recruiter's hard constraints before it may spend a credit,
  * and fills any platform the model left without a usable query from the
@@ -256,9 +249,12 @@ export async function planQueries(constraints: MergedConstraints, customApiKey?:
 
   if (!apiKey) return { queries: buildQueryBundle(baseTerms, platforms), analysis: null, report: null };
 
-  console.log('Planning X-Ray queries with the reasoning model for:', constraints.job_title);
+  console.log('Planning X-Ray queries with DeepSeek for:', constraints.job_title);
+  // The planner writes the longest answer of any call, so it gets more room
+  // than the default — but two attempts (120 s + 1.5 s + 120 s) must still
+  // finish inside /api/generate-queries' 300 s maxDuration.
   const out = await callDeepSeekAPI<PlannerOutput>(plannerPrompt(constraints, baseTerms, platforms, details), XRAY_QUERY_PLANNER_SYSTEM_PROMPT, apiKey, {
-    profile: 'reasoning',
+    timeoutMs: 120_000,
   });
   // Model vocabulary is merged under the usual rules (exclusions must be
   // grounded in the recruiter's words; skills and orgs stay pinned).
@@ -503,9 +499,9 @@ export async function parseJDWithAI(
       const structured = mergeStructured(ai, heuristic.structured_jd);
       const merged_constraints = constraintsFromStructuredJD(structured, jdText);
 
-      // Only a draft: the recruiter confirms the constraints next, and that is
-      // when the reasoning model plans the real bundle (/api/generate-queries).
-      // Planning here as well would pay for the thinking model twice.
+      // Only a draft: the recruiter confirms the constraints next, and the
+      // planner runs only if they ask for it ("Improve with AI",
+      // /api/generate-queries). Planning here would pay for it twice.
       onStage?.('queries', 'Drafting X-Ray queries from the extracted constraints…');
       const query_bundle = generateQueryBundleForConstraints(merged_constraints);
 

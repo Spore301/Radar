@@ -1,26 +1,7 @@
-import { MergedConstraints, MatchBreakdown, CandidateProfile } from '../types';
-import { parseLocation } from '../search/location';
+import { MergedConstraints, MatchBreakdown, CandidateProfile, CandidateFacets, CandidateLocationFacets } from '../types';
+import { locationCountries, parseLocation } from '../search/location';
+import { deriveCandidateFacets } from '../search/facets';
 import { isSoftSkill } from '../search/xrayTemplates';
-
-// Alternate spellings a profile and a JD commonly disagree on. Both sides are
-// normalised before comparison so "Bengaluru, Karnataka" matches "Bangalore".
-const LOCATION_SPELLINGS: Array<[RegExp, string]> = [
-  [/bengaluru/g, 'bangalore'],
-  [/gurugram/g, 'gurgaon'],
-  [/bombay/g, 'mumbai'],
-  [/new delhi|ncr/g, 'delhi'],
-  [/\bnyc\b/g, 'new york'],
-  [/\bsf\b|bay area/g, 'san francisco'],
-  [/münchen/g, 'munich'],
-  [/wien/g, 'vienna'],
-  [/zürich/g, 'zurich'],
-];
-
-function normalizeLocation(value: string): string {
-  let out = (value || '').toLowerCase();
-  for (const [re, replacement] of LOCATION_SPELLINGS) out = out.replace(re, replacement);
-  return out;
-}
 
 /** Whole-name match, tolerant of punctuation inside names ("IIT-B", "S&P Global"). */
 function mentions(text: string, org: string): boolean {
@@ -35,6 +16,38 @@ export interface ScoringEvidence {
   title?: string;
   /** The SERP snippet — past roles, education, summary. */
   snippet?: string;
+  /** Normalised facets for the result (location city / country with its evidence). Derived from the location string when absent. */
+  facets?: CandidateFacets | null;
+}
+
+/**
+ * Location fit, 0–15, from the candidate's location facets:
+ *   15  same city (alias-aware), or a remote role and the candidate is in a
+ *       target country (or the role names no country at all)
+ *   11  same country — a LinkedIn country subdomain counts as evidence
+ *    8  unknown, or the role names no location
+ *    4  a known location in another country (or another city when no country
+ *       is known on either side)
+ * Only ever used to sort: a mismatch never removes a candidate.
+ */
+export function locationFitScore(candidate: CandidateLocationFacets, constraints: MergedConstraints, candidateLocation = ''): number {
+  const want = parseLocation(constraints.location);
+  const remoteRole = Boolean(constraints.remote_eligible) || want.remote;
+  const wantCountries = locationCountries(want).map((c) => c.name);
+  const wantCities = want.cities.map((c) => c.name);
+  if (!want.display && !remoteRole) return 8;
+  if (remoteRole && wantCountries.length === 0 && wantCities.length === 0) return 15;
+  if (candidate.city && wantCities.includes(candidate.city)) return 15;
+  if (candidate.country && wantCountries.includes(candidate.country)) return remoteRole ? 15 : 11;
+  if (!candidate.country && !candidate.city) {
+    // A remote-eligible role and a profile that says only "Remote" is still a fit.
+    return remoteRole && /\bremote\b/i.test(candidateLocation) ? 11 : 8;
+  }
+  if (wantCountries.length === 0) {
+    // The role names a town the location table doesn't know: match it by name, otherwise we can't tell.
+    return want.unknown.some((u) => candidateLocation.toLowerCase().includes(u.toLowerCase())) ? 15 : 8;
+  }
+  return 4;
 }
 
 export function calculateRelevanceScore(
@@ -146,25 +159,13 @@ export function calculateRelevanceScore(
   }
   const seniority_score = titlePart + seniorityPart;
 
-  // 4. Location / Remote Fit (Max 15)
-  //
-  // Alias-aware: "Bangalore" and "Bengaluru, Karnataka, India" are the same
-  // place; same country but a different city is partial credit; an unknown
-  // candidate location is neutral-low rather than a penalty.
-  let location_score = 8;
-  const want = parseLocation(constraints.location);
-  const have = parseLocation(candidateLocation);
-  const unknown = /not specified/i.test(candidateLocation) || (!have.cities.length && !have.country && !have.remote);
-  if (constraints.remote_eligible && (have.remote || want.remote)) {
-    location_score = 15;
-  } else if (want.cities.length && have.cities.length && want.cities.some((w) => have.cities.some((h) => h.name === w.name))) {
-    location_score = 15;
-  } else if (want.country && have.country && want.country.name === have.country.name) {
-    location_score = 11;
-  } else if (unknown || !want.display) {
-    location_score = 8;
-  } else {
-    location_score = 4;
+  // 4. Location / Remote Fit (Max 15) — from facets, so a LinkedIn country
+  // subdomain counts as country evidence even when the snippet hid the
+  // location line. See locationFitScore.
+  const locFacets =
+    evidence.facets?.location ?? deriveCandidateFacets({ profile_url: '', location: candidateLocation }).location;
+  const location_score = locationFitScore(locFacets, constraints, candidateLocation);
+  if (location_score === 4) {
     missingSignals.push(`Location: profile says ${candidateLocation}, role is ${constraints.location}`);
   }
 

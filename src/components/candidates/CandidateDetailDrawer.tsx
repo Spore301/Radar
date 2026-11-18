@@ -2,8 +2,9 @@
 
 import React, { useEffect, useState } from 'react';
 import { CandidateProfile, OutreachChannel, CandidateStatus, OutreachLog } from '@/lib/types';
-import { X, ExternalLink, MapPin, ChevronDown, Send, Building2 } from 'lucide-react';
+import { X, ExternalLink, ChevronDown, Send, Building2 } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
+import { CandidateFacetLine } from './CandidateCard';
 import { Avatar } from '@/components/ui/Avatar';
 import { scoreTier, TIER_LABEL, TIER_TEXT } from '@/lib/utils/tier';
 import { CHANNELS, STAGES, channelDef, isAtLeast, relativeAgo } from '@/lib/pipeline/stages';
@@ -120,10 +121,8 @@ export function CandidateDetailDrawer({ candidate, onClose, onUpdateCandidate, o
                   <Building2 className="w-3 h-3" /> {candidate.organization_match}
                 </span>
               )}
-              <span className="flex items-center gap-1 truncate">
-                <MapPin className="w-3 h-3" /> {candidate.location}
-              </span>
             </div>
+            <CandidateFacetLine candidate={candidate} className="mt-1.5" />
           </div>
           <button type="button" onClick={onClose} className="btn-icon" aria-label="Close">
             <X className="w-4 h-4" />

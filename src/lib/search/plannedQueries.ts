@@ -1,13 +1,13 @@
 import type { CandidatePlatform, MergedConstraints, XRayQuery } from '../types';
 import { getPlatformMeta, normalizePlatform, PLATFORM_IDS } from './platforms';
-import { buildQueryBundle, countGoogleWords, GOOGLE_WORD_LIMIT, isGroundedIn, PlannedTier, QueryTerms, withOrgClause } from './xrayTemplates';
+import { buildQueryBundle, countGoogleWords, GOOGLE_WORD_LIMIT, isGroundedIn, orGroup, PlannedTier, QueryTerms, withOrgClause } from './xrayTemplates';
 import { canonicalizeQueryString, DUPLICATE_SIMILARITY_THRESHOLD, querySimilarity, validateQuery } from './queryValidation';
 import { serialize, tokenize } from './queryTokens';
 
 // ---------------------------------------------------------------------------
 // Planned-query gate.
 //
-// The reasoning model writes the X-Ray strings itself (XRAY_QUERY_PLANNER_
+// The DeepSeek planner writes the X-Ray strings itself (XRAY_QUERY_PLANNER_
 // SYSTEM_PROMPT); this module decides which of them may spend a credit. The
 // model is trusted for strategy and wording, never for the recruiter's hard
 // constraints, so every query is checked here before it is accepted:
@@ -21,6 +21,11 @@ import { serialize, tokenize } from './queryTokens';
 //                  or it is the standard job-post noise filter;
 //   * orgs       — target organisations must appear (inserted if missing),
 //                  excluded ones must be negated (appended if missing);
+//   * geography  — LinkedIn queries for a single-country role use that
+//                  country's host (site:in.linkedin.com/in/, www for the US),
+//                  and a city-bound role's LinkedIn queries carry the city
+//                  clause (appended if missing). A query that then runs over
+//                  32 words is rejected, never truncated;
 //   * fairness   — no protected characteristic, in or out;
 //   * spend      — near-duplicates dropped, per-platform and per-run caps.
 //
@@ -142,6 +147,31 @@ function enforceOrganisations(query: string, terms: QueryTerms, platform: Candid
   return out;
 }
 
+const LINKEDIN_ANCHOR_RE = /site:(?:[a-z]{2,3}\.)?linkedin\.com\/in\/?(?=[\s)]|$)/gi;
+
+/**
+ * Pins the role's geography onto a planned query (see the module header): the
+ * LinkedIn anchor is rewritten to the country host, also inside a MultiSite
+ * group, and a LinkedIn query that names none of the role's city spellings
+ * gets the city clause before its exclusions. Roles with no single country
+ * keep whatever LinkedIn host the model chose.
+ */
+export function enforceGeography(query: string, terms: QueryTerms, platform: CandidatePlatform): string {
+  let out = query;
+  const host = terms.linkedin_host;
+  if (host && host !== 'linkedin.com' && (platform === 'LinkedIn' || platform === 'MultiSite')) {
+    out = out.replace(LINKEDIN_ANCHOR_RE, `site:${host}/in/`);
+  }
+  if (platform === 'LinkedIn' && terms.location_terms.length && !terms.location_terms.some((t) => mentions(out, t))) {
+    const clause = orGroup(terms.location_terms, 2);
+    const tokens = tokenize(out);
+    const firstExclude = tokens.findIndex((t) => t.kind === 'exclude');
+    if (firstExclude === -1) out = `${out} ${clause}`;
+    else out = `${serialize(tokens.slice(0, firstExclude))} ${clause} ${serialize(tokens.slice(firstExclude))}`;
+  }
+  return out;
+}
+
 /**
  * Turns the planner's output into the run bundle: accepted model queries,
  * ordered by platform then tier, plus template queries for any selected
@@ -179,7 +209,7 @@ export function acceptPlannedQueries(
 
     const { query: cleaned, removed } = stripUngroundedExclusions(raw, ctx.terms, ctx.details);
     if (removed.length) console.info(`Planner query on ${platform}: dropped exclusions the recruiter never asked for: ${removed.join(' ')}`);
-    const query = canonicalizeQueryString(enforceOrganisations(cleaned, ctx.terms, platform));
+    const query = canonicalizeQueryString(enforceGeography(enforceOrganisations(cleaned, ctx.terms, platform), ctx.terms, platform));
 
     if (countGoogleWords(query) > GOOGLE_WORD_LIMIT) {
       reject(label, query, `${countGoogleWords(query)} words — over Google's ${GOOGLE_WORD_LIMIT}-word limit`);

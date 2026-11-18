@@ -2,11 +2,46 @@
 
 import React from 'react';
 import { CandidateProfile } from '@/lib/types';
-import { MapPin, ExternalLink, Check, Building2 } from 'lucide-react';
+import { MapPin, ExternalLink, Check, Building2, Briefcase } from 'lucide-react';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
 import { Avatar } from '@/components/ui/Avatar';
 import { scoreTier, TIER_BG, TIER_LABEL, TIER_TEXT } from '@/lib/utils/tier';
+import { getCandidateFacets, locationDisplay } from '@/lib/filters/candidateFilters';
 import { TrackingChips } from './TrackingChips';
+
+/**
+ * The quiet "where / who for" line: location from the candidate's facets
+ * ("Bengaluru, India", "India · from profile URL", or "Location not stated")
+ * and the current company when the result names one. Never shows the raw
+ * stored location string, which can hold headline fragments.
+ */
+export function CandidateFacetLine({ candidate, className = '' }: { candidate: CandidateProfile; className?: string }) {
+  const facets = getCandidateFacets(candidate);
+  const loc = locationDisplay(facets.location);
+  const company = facets.current_company?.trim() || null;
+  return (
+    <p className={`flex items-center gap-1 min-w-0 text-body-xs text-mute ${className}`} data-facet-location={loc.known ? loc.text : ''}>
+      <MapPin className="w-3 h-3 flex-shrink-0" aria-hidden />
+      <span className="sr-only">Location: </span>
+      <span className={`truncate ${loc.known ? '' : 'text-faint'}`} title={loc.title}>
+        {loc.text}
+        {loc.note && <span className="text-faint"> · {loc.note}</span>}
+      </span>
+      {company && (
+        <>
+          <span aria-hidden className="text-faint px-0.5">
+            ·
+          </span>
+          <Briefcase className="w-3 h-3 flex-shrink-0" aria-hidden />
+          <span className="sr-only">Current company: </span>
+          <span className="truncate" title={`Current company, as the search result states it: ${company}`}>
+            {company}
+          </span>
+        </>
+      )}
+    </p>
+  );
+}
 
 interface CandidateCardProps {
   candidate: CandidateProfile;
@@ -65,6 +100,7 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
               {candidate.name}
             </button>
             <p className="text-body-xs text-mute truncate">{candidate.headline}</p>
+            <CandidateFacetLine candidate={candidate} className="mt-0.5" />
           </div>
         </div>
         <div className="flex items-center gap-3 text-body-xs text-mute md:w-56 min-w-0">
@@ -74,9 +110,6 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
               <Building2 className="w-3 h-3" /> {candidate.organization_match}
             </span>
           )}
-          <span className="truncate flex items-center gap-1">
-            <MapPin className="w-3 h-3" /> {candidate.location}
-          </span>
         </div>
         <ScoreBar score={candidate.match_score} className="md:w-52" />
         <TrackingChips candidate={candidate} compact />
@@ -94,6 +127,7 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
             {candidate.name}
           </button>
           <p className="text-body-sm text-mute line-clamp-1">{candidate.headline}</p>
+          <CandidateFacetLine candidate={candidate} className="mt-1" />
         </div>
         <button type="button" onClick={() => onSelect(candidate)} className="btn-icon h-7 w-7 flex-shrink-0" aria-label="Open details">
           <ExternalLink className="w-3.5 h-3.5" />
@@ -122,9 +156,6 @@ export function CandidateCard({ candidate, onSelect, onStatusChange, onOpenOutre
       <div className="flex items-center justify-between gap-2 pt-3 border-t border-hairline">
         <div className="flex items-center gap-2 text-body-xs text-mute min-w-0">
           <PlatformBadge platform={candidate.platform} />
-          <span className="truncate flex items-center gap-1">
-            <MapPin className="w-3 h-3 flex-shrink-0" /> {candidate.location}
-          </span>
         </div>
         {actions}
       </div>

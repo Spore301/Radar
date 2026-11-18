@@ -23,6 +23,10 @@ export interface RunQuerySnapshot {
   keptCount: number;
   creditCost: number;
   error?: string | null;
+  /** 'relaxed' | 'fallback' | a provider error kind ('out_of_credits', 'hourly_limit', 'timeout', …). */
+  code?: string | null;
+  /** Which search provider answered ('serpapi', 'serper', …), when one did. */
+  provider?: string | null;
 }
 
 export interface RunSnapshot {

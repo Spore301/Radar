@@ -1,7 +1,8 @@
 import { CandidatePlatform, CandidateProfile, MergedConstraints, XRayQuery } from '../types';
 import { calculateRelevanceScore } from '../utils/scoring';
 import { detectPlatformFromUrl } from './platforms';
-import { ANY_CITY_RE, detectCityInText, cityDisplay } from './location';
+import { ANY_CITY_RE } from './location';
+import { deriveFacetsWithLabel } from './facets';
 import type { RawSearchResult } from './serp';
 
 // ---------------------------------------------------------------------------
@@ -213,24 +214,6 @@ export function detectSkills(text: string, constraints: MergedConstraints): stri
   return found;
 }
 
-/**
- * LinkedIn snippets start with the profile location ("Bengaluru, Karnataka,
- * India · Senior Product Designer · Acme"); other platforms rarely expose one.
- * Falls back to the shared city table. Never borrows the JD's location — an
- * unknown location must stay unknown so scoring and dedupe don't treat every
- * profile as living where the job is.
- */
-export function detectLocation(snippet: string, fullText: string): string {
-  const lead = snippet.split(/\s[·•|]\s/)[0]?.trim() ?? '';
-  if (lead && lead.length <= 60 && /,/.test(lead) && !/\d/.test(lead) && !/[:]/.test(lead) && /^[A-Z]/.test(lead) && !/\b(years?|experience|skills?|tags?)\b/i.test(lead)) {
-    return lead;
-  }
-  const city = detectCityInText(fullText);
-  if (city) return cityDisplay(city);
-  if (/\bremote\b/i.test(fullText)) return 'Remote';
-  const country = fullText.match(/\b(india|germany|united kingdom|united states|canada|australia|singapore|netherlands|france)\b/i);
-  return country ? country[1].replace(/\b\w/g, (m) => m.toUpperCase()) : UNKNOWN_LOCATION;
-}
 
 // Kept for callers that only need a boolean "mentions a city".
 export const LOCATION_HINTS = ANY_CITY_RE;
@@ -327,8 +310,18 @@ export function indexSerpResult(
   if (name !== PLACEHOLDER_NAME && ORG_TITLE.test(name)) return null;
   const fullText = `${result.title} ${result.snippet}`;
   const skills = detectSkills(fullText, constraints);
-  const location = detectLocation(result.snippet, fullText);
-  const seniority = detectSeniority(headline || result.title);
+  // Facets read the URL exactly as the engine returned it — the LinkedIn
+  // country subdomain is evidence — so they run before canonicalisation.
+  const { facets, location_label } = deriveFacetsWithLabel({
+    profile_url: result.url,
+    title: result.title,
+    snippet: result.snippet,
+    headline,
+    extensions: result.extensions,
+    displayed_link: result.displayed_link,
+  });
+  const location = location_label ?? (/\bremote\b/i.test(fullText) ? 'Remote' : UNKNOWN_LOCATION);
+  const seniority = facets.seniority ?? detectSeniority(headline || result.title);
   const years = detectExperienceYears(result.snippet);
 
   const { overall_score, match_breakdown, match_rationale, missing_signals, organization_match } = calculateRelevanceScore(
@@ -337,7 +330,7 @@ export function indexSerpResult(
     location,
     headline,
     constraints,
-    { title: result.title, snippet: result.snippet }
+    { title: result.title, snippet: result.snippet, facets }
   );
 
   // Rough sense of how much the SERP actually told us about this person.
@@ -368,13 +361,19 @@ export function indexSerpResult(
     match_rationale,
     missing_signals,
     organization_match,
+    facets,
     data_completeness: Math.min(1, Math.round(completeness * 100) / 100),
+    // Facets ride inside the existing JSON column (no schema change); the
+    // structured SERP fields are kept so facets can be re-derived later.
     raw_scraped_data: {
       organization_match,
       serp_title: result.title,
       serp_position: result.position ?? null,
       canonical_url: canonical,
       query_type: query.query_type,
+      facets,
+      ...(result.extensions?.length ? { serp_extensions: result.extensions.slice(0, 8) } : {}),
+      ...(result.displayed_link ? { displayed_link: result.displayed_link } : {}),
     },
     source_query: query.id,
     scrape_status: 'snippet_only',

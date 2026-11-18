@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { providerLabel } from '@/lib/search/providers/labels';
 import Link from 'next/link';
 import { Check, ChevronDown, Loader2, Minus, Search, X, AlertTriangle } from 'lucide-react';
 import { useRunTracker } from './RunTracker';
@@ -104,10 +105,14 @@ function RunRow({ run }: { run: RunSnapshot }) {
       {open && (
         <ul className="bg-canvas border-t border-hairline-soft max-h-48 overflow-y-auto">
           {run.queries.map((q) => (
-            <li key={q.queryId} className="px-3 py-1.5 flex items-center gap-2 text-body-xs">
+            <li key={q.queryId} className="px-3 py-1.5 flex items-center gap-2 text-body-xs" title={q.error ?? undefined}>
               <QueryGlyph outcome={q.outcome} />
               <PlatformBadge platform={q.platform} />
-              <span className="text-body truncate flex-1">{queryLabel(q.queryType)}</span>
+              <span className="text-body truncate flex-1">
+                {queryLabel(q.queryType)}
+                {q.code === 'relaxed' && <span className="text-mute"> · relaxed</span>}
+                {q.code === 'fallback' && q.provider && <span className="text-mute"> · via {providerLabel(q.provider)}</span>}
+              </span>
               <span className={`tabular-nums flex-shrink-0 ${q.outcome === 'failed' ? 'text-warning-deep' : 'text-mute'}`}>
                 {q.outcome === 'fetched'
                   ? `${q.keptCount}/${q.resultCount}`

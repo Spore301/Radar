@@ -2,8 +2,10 @@
  *
  * 1. Seeds a QA user + Auth.js database session in prisma/dev.db.
  * 2. Drives the production server (port 3100) with Playwright using that
- *    session cookie: sidebar, history panel, demo session, constraints,
- *    query modal, streamed run (fallback engine — expected to index 0), then
+ *    session cookie: sidebar, history panel, demo session, constraints form
+ *    with its credit ceiling, optional query review, direct search (refused
+ *    without a SerpAPI key, then run with a deliberately invalid key so no
+ *    real credit is spent), background run, edit & re-run, then
  *    seeds fixture candidates through the repository and verifies cards,
  *    shortlist persistence, drawer save, pipeline, templates, settings.
  * 3. Cleans up everything it created.
@@ -75,6 +77,11 @@ async function shot(page: Page, name: string) {
       anonPage.url(),
     );
     await anonPage.screenshot({ path: `${SHOTS}/00-landing.png` });
+    const termsResp = await anon.request.get(`${BASE}/terms`);
+    const termsHtml = await termsResp.text();
+    check('terms page is public and names the operator', termsResp.status() === 200 && termsHtml.includes('Debargha Bandyopadhyay') && /in testing/i.test(termsHtml), `status ${termsResp.status()}`);
+    await anonPage.goto(`${BASE}/signin`, { waitUntil: 'domcontentloaded' });
+    check('sign-in page states that continuing means agreeing to the terms', (await anonPage.getByRole('link', { name: 'Terms of Use' }).count()) === 1 && (await anonPage.getByText(/product in testing/i).count()) >= 1);
     const resp = await anonPage.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
     check('unauthenticated /dashboard redirects to /signin', anonPage.url().includes('/signin'), `${resp?.status()} → ${anonPage.url()}`);
     const health = await anon.request.get(`${BASE}/api/health`);
@@ -130,9 +137,27 @@ async function shot(page: Page, name: string) {
     check('organisation chips added with current-employer scope', (await orgs.locator('.chip', { hasText: 'Acme' }).count()) === 1 && (await orgs.getByRole('button', { name: 'Current employer only' }).getAttribute('aria-pressed')) === 'true');
     await shot(page, '03b-organisations');
 
-    // --- generate queries ----------------------------------------------------
-    await page.getByRole('button', { name: /^Generate \d+ quer/ }).click();
-    await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).waitFor({ timeout: 60000 });
+    // --- direct search: no query-generation step, the ceiling beside the button ---------
+    const findBtn = page.getByRole('button', { name: 'Find candidates', exact: true });
+    check('constraints form searches directly (Find candidates, no Generate step)', (await findBtn.isVisible()) && (await page.getByRole('button', { name: /^Generate \d+ quer/ }).count()) === 0);
+    const formDepth = page.getByRole('combobox', { name: /^Depth/ });
+    check('depth selector lives in the constraints form', (await formDepth.count()) === 1 && (await formDepth.isVisible()));
+    await formDepth.selectOption('2');
+    const ceilingRe = /(\d+) quer(?:y|ies) × up to (\d+) pages? · at most (\d+) credits?/;
+    const formCeiling = page.getByText(ceilingRe).first();
+    await formCeiling.waitFor({ timeout: 5000 });
+    const ceilingMatch = ((await formCeiling.textContent()) ?? '').match(ceilingRe);
+    check(
+      'credit ceiling stated beside the button and follows the depth (queries × pages = credits)',
+      Boolean(ceilingMatch) && ceilingMatch![2] === '2' && Number(ceilingMatch![1]) * 2 === Number(ceilingMatch![3]),
+      ceilingMatch?.[0]
+    );
+    check('depth is remembered per browser', (await page.evaluate(() => localStorage.getItem('radr.searchDepth'))) === '2');
+
+    // --- optional review: the form's bundle opens in the query modal at once -----------
+    await page.getByRole('button', { name: 'Review queries', exact: true }).click();
+    await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).waitFor({ timeout: 15000 });
+    await page.locator('[role="dialog"] [data-query-row]').first().waitFor({ timeout: 5000 });
     const rows = await page.locator('[role="dialog"] [data-query-row]').count();
     const rowTexts = (await page.locator('[role="dialog"] [data-query-row]').allTextContents()).map((t) => t.replace(/\s+/g, ' '));
     const linkedinRows = rowTexts.filter((t) => t.includes('linkedin.com/in'));
@@ -146,11 +171,15 @@ async function shot(page: Page, name: string) {
     check('every query excludes the excluded organisation', rowsWithExclusion === rows, `${rowsWithExclusion}/${rows}`);
     check('query rows render the whole query as pills (no clipped textarea)', (await page.locator('[role="dialog"] [data-query-row] textarea').count()) === 0 && (await page.locator('[role="dialog"] [data-query-row] [title="Operator"]').count()) >= rows);
     check('query modal shows one editable row per approved query', rows >= 8 && rows <= 16, `${rows} rows`);
-    check('query modal has depth control', await page.getByText('Depth').isVisible());
+    check('review rows match the ceiling the form stated', ceilingMatch !== null && Number(ceilingMatch[1]) <= rows, `${ceilingMatch?.[1]} runnable / ${rows} rows`);
+    const dialog = page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ });
+    const modalDepth = dialog.getByRole('combobox', { name: /^Depth/ });
+    check('query modal keeps a depth control in sync with the form', (await modalDepth.isVisible()) && (await modalDepth.inputValue()) === '2', await modalDepth.inputValue());
+    check('query modal states the same credit ceiling', (await dialog.getByText(/× up to 2 pages · at most \d+ credits?/).count()) === 1);
+    check('Improve with AI is offered inside the review (not clicked: it calls the slow planner)', await dialog.getByRole('button', { name: 'Improve with AI' }).isEnabled());
     await shot(page, '04-query-modal');
 
     // --- editor: text box + coloured syntax chips ---------------------------------------
-    const dialog = page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ });
     const firstRow = dialog.locator('[data-query-row]').first();
     await firstRow.getByRole('button', { name: 'Edit' }).click();
     const editor = dialog.getByLabel('Query editor');
@@ -172,20 +201,47 @@ async function shot(page: Page, name: string) {
     await dialog.getByRole('button', { name: 'Custom query' }).click();
     check('custom query adds a row in the editor', (await dialog.locator('[data-query-row]').count()) === rows + 1 && (await dialog.getByLabel('Query editor').count()) === 1);
     await dialog.locator('[data-query-row]').last().getByRole('button', { name: 'Remove query' }).click();
+    check('modal Run states the runnable count', (await dialog.getByRole('button', { name: /^Run \d+ quer/ }).count()) === 1);
+    // Leave without running: review is optional, and the edits above are discarded.
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await dialog.waitFor({ state: 'detached', timeout: 5000 });
+    check('cancelling the review returns to the form', await findBtn.isVisible());
 
-    // --- no SerpAPI key: the run is refused up front, not silently empty -----------
-    await page.getByRole('dialog').getByRole('button', { name: /^Run \d+ quer/ }).click();
+    // --- consent before spend: Enter in a field never starts a search -----------------------
+    await page.getByLabel('Job title').first().press('Enter');
+    await page.waitForTimeout(1000);
+    check(
+      'Enter in a form field does not start a search',
+      (await page.getByRole('dialog', { name: /Running \d+ X-Ray/ }).count()) === 0 && (await page.getByText(/No SerpAPI key on file/).count()) === 0
+    );
+
+    // --- no SerpAPI key: the direct search is refused up front, not silently empty -----------
+    // (Every Search/Run click in this script happens with no key or a deliberately invalid one: no real credit is spent.)
+    // An edit made after the review, so only the direct-search path can have saved it.
+    const capSlider = page.getByRole('slider', { name: /Results cap/ });
+    const capBefore = Number(await capSlider.inputValue());
+    await capSlider.focus();
+    await capSlider.press(capBefore >= 100 ? 'ArrowLeft' : 'ArrowRight');
+    const capAfter = Number(await capSlider.inputValue());
+    await findBtn.click();
     await page.getByText(/No SerpAPI key on file/).first().waitFor({ timeout: 10000 });
-    check('run without a SerpAPI key is refused with a clear message', await page.getByText(/No SerpAPI key on file/).first().isVisible());
+    check('direct search without a SerpAPI key is refused with a clear message', await page.getByText(/No SerpAPI key on file/).first().isVisible());
+    check('direct search skips the query review', (await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).count()) === 0);
+    const savedBeforeRun = (await prisma.job.findUnique({ where: { id: createdSessionId! }, select: { mergedConstraints: true } }))?.mergedConstraints as any;
+    check(
+      'form edits are saved to the session even when the run is refused',
+      capAfter !== capBefore && savedBeforeRun?.results_cap === capAfter && savedBeforeRun?.target_organizations?.[0] === 'Acme',
+      `results_cap ${capBefore} → ${capAfter}, stored ${savedBeforeRun?.results_cap}`
+    );
 
-    // --- with a key on file (deliberately invalid): the run proceeds and the receipt explains -----
+    // --- with a key on file (deliberately invalid): one click starts the run, the receipt explains -----
     await setProviderKey(user.id, 'serpapi', 'qa-invalid-serpapi-key-000000');
-    await page.getByRole('button', { name: /Review \d+ queries|Re-run queries/ }).click();
-    await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).waitFor();
-    await page.getByRole('dialog').getByRole('button', { name: /^Run \d+ quer/ }).click();
+    await findBtn.click();
     const overlay = page.getByRole('dialog', { name: /Running \d+ X-Ray/ });
     await overlay.waitFor({ timeout: 10000 });
+    check('Find candidates starts the run in one click (no review modal)', (await page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ }).count()) === 0);
     check('processing overlay appears with per-query rows', (await overlay.getByText(/queued|searching…/).count()) > 0);
+    check('overlay states the depth the search runs at', (await overlay.getByText(/up to 2 pages per query/).count()) === 1);
     await shot(page, '05-overlay');
 
     // --- async: stop waiting and the run keeps reporting in the popup ----------
@@ -230,6 +286,19 @@ async function shot(page: Page, name: string) {
     const receiptRows = await page.locator('table tbody tr').count();
     check('receipt has one row per query', receiptRows === rows, `${receiptRows} rows`);
     await shot(page, '06-results-empty');
+
+    // --- after a run: the last bundle opens for editing and re-running (opened, never run) ---
+    const rerun = page.getByRole('button', { name: 'Edit queries & re-run' });
+    check('results offer Edit queries & re-run', await rerun.isVisible());
+    await rerun.click();
+    const rerunDialog = page.getByRole('dialog', { name: /quer(y|ies) · each searched individually/ });
+    await rerunDialog.waitFor({ timeout: 10000 });
+    await rerunDialog.locator('[data-query-row]').first().waitFor({ timeout: 5000 });
+    const rerunRows = await rerunDialog.locator('[data-query-row]').count();
+    check('re-run opens the review pre-filled with the last bundle', rerunRows === rows, `${rerunRows} rows`);
+    check('depth survives a reload (remembered per browser)', (await rerunDialog.getByRole('combobox', { name: /^Depth/ }).inputValue()) === '2');
+    await rerunDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await rerunDialog.waitFor({ state: 'detached', timeout: 5000 });
 
     // --- seed fixture candidates via the repository (fallback engine indexes 0) ---
     const detail = await repo.getSession(createdSessionId!, user.id);
@@ -519,7 +588,11 @@ async function shot(page: Page, name: string) {
     check('agent replies with a visible reasoning trace', (await page.getByText(/Reasoning · \d+ steps/).count()) >= 1);
     check('reasoning opens with the search-budget guardrail', (await page.getByText(/Search budget:/).count()) >= 1);
     check('agent extracted constraints into the scope panel', await page.getByText('Pune', { exact: false }).first().isVisible());
-    check('agent does NOT build queries on a partial brief', (await page.getByRole('button', { name: /Review \d+ queries/ }).count()) === 0);
+    check(
+      'agent offers no search, review or credit ceiling on a partial brief',
+      (await page.getByRole('button', { name: /^(Find candidates|Review queries|Review \d+ queries|Build the queries)$/ }).count()) === 0 &&
+        (await page.getByText(/at most \d+ credits?/).count()) === 0
+    );
     check('agent is gathering or scoping, not ready', (await page.getByText(/Gathering required scope|Completing the scope|Awaiting your go-ahead/).count()) >= 1);
     const agentSessionId = new URL(page.url()).searchParams.get('session');
     check('agent turn created a stored session', Boolean(agentSessionId), agentSessionId ?? undefined);

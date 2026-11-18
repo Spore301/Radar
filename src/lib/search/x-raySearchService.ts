@@ -3,6 +3,9 @@ import { deduplicateCandidates } from '../utils/deduplication';
 import { isKnownPlatform, normalizePlatform } from './platforms';
 import { indexSerpResult } from './serpIndexer';
 import { runSerpQuery, SerpApiKeys, SerpOptions, SerpProvider } from './serp';
+import { relaxQueryString } from './relax';
+import { validateQuery } from './queryValidation';
+import type { ProviderRunState } from './providers/runState';
 
 // ---------------------------------------------------------------------------
 // X-Ray search orchestrator.
@@ -36,6 +39,14 @@ export interface QueryRunResult {
   error?: string;
   /** The engine's own account of the result set — populated especially when nothing came back. */
   notice?: string;
+  /** The string that actually ran when it differs from queryString (zero-result relaxation). */
+  ranQuery?: string;
+  /** Machine-readable reason: 'relaxed' | 'fallback' | a provider error kind ('out_of_credits', 'timeout', …). */
+  code?: string;
+  /** Wall time of this query, ms. */
+  latencyMs?: number;
+  /** A provider became unusable for the rest of the run during this query. */
+  fatal?: { provider: 'serpapi' | 'serper'; kind: string; message: string };
 }
 
 export interface SearchStats {
@@ -108,22 +119,54 @@ export function sanitizeQueries(queries: XRayQuery[]): { runnable: XRayQuery[]; 
   return { runnable, skipped };
 }
 
+/** Per-run context for searchOneQuery. */
+export interface SearchOneOptions {
+  /** Run-level provider latch (runManager) — shared by every query of the run. */
+  providerState?: ProviderRunState;
+  /** Relaxation function; defaults to relaxQueryString. Pass null to disable. */
+  relax?: ((query: XRayQuery, constraints: MergedConstraints) => string | null) | null;
+}
+
 /**
  * Searches ONE query and indexes its results. The building block of both the
  * in-memory executeXRaySearch below and the resumable background worker
  * (runManager.ts), which persists each query's candidates as it lands so a
  * worker that is frozen or killed mid-run loses at most the query in flight.
  * Never throws: a failure is reported as a 'failed' outcome.
+ *
+ * The indexer is consulted page by page (read-only) so the pager can stop at
+ * the first page that yields no candidate; a zero-result first page gets one
+ * relaxed variant from relaxQueryString, validated before it may spend.
  */
 export async function searchOneQuery(
   q: XRayQuery,
   constraints: MergedConstraints,
   jobId: string,
   keys: SerpApiKeys,
-  serpOptions?: SerpOptions
+  serpOptions?: SerpOptions,
+  options: SearchOneOptions = {}
 ): Promise<{ outcome: QueryRunResult; candidates: CandidateProfile[] }> {
+  const startedAt = Date.now();
   try {
-    const serp = await runSerpQuery(q.query_string, keys, serpOptions);
+    const relaxFn = options.relax === undefined ? relaxQueryString : options.relax;
+    const relax = relaxFn
+      ? () => {
+          const relaxed = relaxFn(q, constraints);
+          if (typeof relaxed !== 'string' || !relaxed.trim()) return null;
+          // A relaxed string spends a credit like any other query, so it must
+          // pass the same validator the approved bundle did.
+          const verdict = validateQuery({ ...q, query_string: relaxed.trim(), is_edited: true }, constraints);
+          return verdict.ok ? relaxed.trim() : null;
+        }
+      : undefined;
+
+    const serp = await runSerpQuery(q.query_string, keys, serpOptions, {
+      state: options.providerState,
+      relax,
+      // The query string that actually ran decides nothing here: indexing is
+      // about the result (URL, title), and the template id stays the same.
+      keptCount: (fresh) => fresh.reduce((n, res) => n + (indexSerpResult(res, q, constraints, jobId) ? 1 : 0), 0),
+    });
     const candidates: CandidateProfile[] = [];
     for (const res of serp.results) {
       const cand = indexSerpResult(res, q, constraints, jobId);
@@ -144,6 +187,10 @@ export async function searchOneQuery(
         creditsUsed: serp.creditsUsed,
         error: failed ? serp.error : undefined,
         notice: serp.notice,
+        ranQuery: serp.ranQuery,
+        code: serp.code,
+        latencyMs: Date.now() - startedAt,
+        fatal: serp.fatal,
       },
       candidates,
     };
@@ -190,7 +237,7 @@ export async function executeXRaySearch(
 ): Promise<XRaySearchResult> {
   const keys: SerpApiKeys = {
     serpapi: apiKeys?.serpapi || process.env.SERPAPI_KEY,
-    brave: apiKeys?.brave || process.env.BRAVE_SEARCH_KEY,
+    serper: apiKeys?.serper || process.env.SERPER_API_KEY,
   };
 
   const { runnable, skipped } = sanitizeQueries(queries);

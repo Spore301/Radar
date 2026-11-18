@@ -7,9 +7,12 @@ import { ChevronDown, Check, AlertTriangle, Minus, Download } from 'lucide-react
 import { FileUploadZone } from '@/components/ingestion/FileUploadZone';
 import { ConstraintsForm } from '@/components/ingestion/ConstraintsForm';
 import { QueryPreviewModal } from '@/components/ingestion/QueryPreviewModal';
+import { useSearchDepth } from '@/components/ingestion/SearchBudget';
 import { CandidateCard } from '@/components/candidates/CandidateCard';
 import { CandidateDetailDrawer } from '@/components/candidates/CandidateDetailDrawer';
 import { FilterPanel } from '@/components/candidates/FilterPanel';
+import { useCandidateFilters } from '@/components/candidates/useCandidateFilters';
+import { providerLabel } from '@/lib/search/providers/labels';
 import { OutreachGeneratorModal } from '@/components/outreach/OutreachGeneratorModal';
 import { ProcessingOverlay, ProcessingState, ProcessingLogItem, ProcessingStep, StepState } from '@/components/processing/ProcessingOverlay';
 import { useRunFinished, useRunTracker } from '@/components/runs/RunTracker';
@@ -27,7 +30,7 @@ import { scoreTier, TIER_BG, TIER_LABEL } from '@/lib/utils/tier';
 import * as api from '@/lib/api/sessions';
 import { notifySessionsChanged } from '@/lib/api/sessions';
 
-const EMPTY_STATS: SearchStats = { total: 0, deduplicated: 0, strong: 0, potential: 0, low: 0, queriesRun: 0, queriesFailed: 0, creditsUsed: 0 };
+const EMPTY_STATS: SearchStats ={ total: 0, deduplicated: 0, strong: 0, potential: 0, low: 0, queriesRun: 0, queriesFailed: 0, creditsUsed: 0 };
 
 type Step = FlowStageKey;
 
@@ -84,12 +87,18 @@ function SourcingDashboard() {
   const tracker = useRunTracker();
   /** The run this page is showing a blocking overlay for, if any. */
   const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
+  /** Pages per query — shared by the constraints form and the query review, remembered per browser. */
+  const [depth, setDepth] = useSearchDepth();
+  /** Set synchronously on click, so a double click can never start two paid runs. */
+  const startingRef = useRef(false);
+  /** The latest constraints/bundle save in flight, so a run never races an older PATCH. */
+  const draftSaveRef = useRef<Promise<string | null> | null>(null);
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedPlatform, setSelectedPlatform] = useState('All');
-  const [selectedMatchTier, setSelectedMatchTier] = useState('All');
-  const [sortBy, setSortBy] = useState('score');
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  // Results filters: location / seniority / company / platform / tier / search,
+  // reset to the session's defaults when the session changes. Filters hide rows;
+  // they never delete them.
+  const resultFilters = useCandidateFilters(candidates, constraints, sessionId);
+  const { filtered, viewMode, resetPlatformAndTier } = resultFilters;
 
   // --- processing helpers ---------------------------------------------------
 
@@ -166,8 +175,6 @@ function SourcingDashboard() {
         setCandidates(detail.candidates);
         setSearchStats(detail.last_run?.stats ?? { ...EMPTY_STATS, deduplicated: detail.candidates.length });
         setQueryResults(detail.last_run?.query_results ?? []);
-        setSelectedPlatform('All');
-        setSelectedMatchTier('All');
         setStep(detail.candidates.length > 0 || detail.last_run ? 'search' : 'constraints');
         setProcessing(null);
         setLastStatus({
@@ -280,7 +287,7 @@ function SourcingDashboard() {
       setQueryResults([]);
       setStep('constraints');
       adoptSession(job.id, job.title);
-      endProcessing(`Demo session created · ${job.query_bundle.length} queries ready to review`);
+      endProcessing('Demo session created · adjust the constraints, then find candidates');
     } catch (e: any) {
       endProcessing(e?.message || 'Could not create the demo session.', 'error');
       setError(e?.message || 'Could not create the demo session.');
@@ -289,77 +296,70 @@ function SourcingDashboard() {
     }
   };
 
-  // --- step 2: constraints → queries ---------------------------------------
+  // --- step 2: constraints → search ------------------------------------------
+  //
+  // No model call sits between the form and the search: the form fills the
+  // approved templates instantly and deterministically, shows the credit
+  // ceiling beside the button, and "Find candidates" saves and starts the run
+  // in one click. Reviewing the queries first is optional, and the slow
+  // reasoning-model planner lives inside that review ("Improve with AI").
 
-  const QUERY_STEPS: ProcessingStep[] = [
-    { key: 'vocab', label: 'Ask DeepSeek for title synonyms, skill spellings and adjacent terms', state: 'pending' },
-    { key: 'templates', label: 'Fill the approved X-Ray templates for the selected platforms', state: 'pending' },
-    { key: 'save', label: 'Save constraints and bundle to the session', state: 'pending' },
-  ];
-  const setQueryStep = (idx: number, status: string) =>
-    patchProcessing({ status, progress: idx / QUERY_STEPS.length, steps: QUERY_STEPS.map((st, i) => ({ ...st, state: i < idx ? 'done' : i === idx ? 'active' : 'pending' })) });
+  const runningForSession = Boolean(sessionId) && tracker.runs.some((r) => r.jobId === sessionId && r.status === 'running');
+  const searchBusyReason = runningForSession ? 'A search for this session is still running. Follow it in the progress popup, bottom right.' : null;
 
-  const handleConstraintsConfirmed = async (updated: MergedConstraints) => {
-    setConstraints(updated);
-    setIsLoading(true);
-    setError(null);
-    beginProcessing({ stage: 'queries', title: 'Generating X-Ray queries', status: '', progress: 0, steps: QUERY_STEPS });
-    setQueryStep(0, `Building sourcing vocabulary for "${updated.job_title}"…`);
-
-    const keys = api.readStoredApiKeys();
-    let queries: XRayQuery[];
-    try {
-      const res = await fetch('/api/generate-queries', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(keys.deepseek ? { 'x-deepseek-api-key': keys.deepseek } : {}) },
-        body: JSON.stringify({ constraints: updated, apiKey: keys.deepseek }),
-      });
-      const data = await res.json();
-      queries = data.success && data.queries ? data.queries : generateQueryBundleForConstraints(updated);
-    } catch (e) {
-      console.error('Failed to fetch DeepSeek queries:', e);
-      queries = generateQueryBundleForConstraints(updated);
-    }
-    setQueryStep(1, `Assembled ${queries.length} queries across ${updated.selected_platforms.length} platforms…`);
-    setQueryBundle(queries);
-
-    let saveNote = '';
-    if (sessionId) {
-      setQueryStep(2, 'Saving constraints and the query bundle to the session…');
+  /** Saves constraints + bundle to the session. Resolves to an error message, or null when saved. */
+  const saveDraft = (c: MergedConstraints, queries: XRayQuery[]): Promise<string | null> => {
+    if (!sessionId) return Promise.resolve('No active session.');
+    const id = sessionId;
+    const p = (async () => {
       try {
-        const job = await api.updateSession(sessionId, { merged_constraints: updated, query_bundle: queries });
+        const job = await api.updateSession(id, { merged_constraints: c, query_bundle: queries });
         setSessionTitle(job.title);
         setSessionUpdatedAt(job.updated_at);
         notifySessionsChanged();
+        return null;
       } catch (e: any) {
-        saveNote = ' (not saved to the session)';
-        setError(e?.message || 'Constraints were generated but could not be saved to the session.');
+        return e?.message || 'The constraints could not be saved to the session.';
       }
-    }
+    })();
+    draftSaveRef.current = p;
+    return p;
+  };
 
-    setIsLoading(false);
-    endProcessing(`${queries.length} queries generated for ${updated.selected_platforms.length} platforms${saveNote} · review and run`, saveNote ? 'error' : 'success');
-    setIsQueryModalOpen(true);
+  const handleFormSearch = (updated: MergedConstraints, queries: XRayQuery[], opts: { review: boolean }) => {
+    setConstraints(updated);
+    setQueryBundle(queries);
+    setError(null);
+    if (opts.review) {
+      void saveDraft(updated, queries).then((err) => err && setError(err));
+      setLastStatus({ message: `${queries.length} queries built from the constraints · review, then run`, tone: 'info' });
+      setIsQueryModalOpen(true);
+      return;
+    }
+    // `updated` is passed explicitly: the state set above is not visible to this call yet.
+    void handleRunSearch(queries, depth, updated);
   };
 
   // --- step 3: run --------------------------------------------------------------
 
-  const handleRunSearch = async (queriesToRun: XRayQuery[], depth: number) => {
+  const handleRunSearch = async (queriesToRun: XRayQuery[], runDepth: number, runConstraints: MergedConstraints | null = constraints) => {
+    if (startingRef.current) return;
     setQueryBundle(queriesToRun);
     setIsQueryModalOpen(false);
     setError(null);
-    if (!sessionId || !constraints) {
+    if (!sessionId || !runConstraints) {
       setError('No active session. Parse a JD or load the demo role before running a search.');
       return;
     }
+    startingRef.current = true;
 
     const total = queriesToRun.length;
-    beginProcessing({
+    const signal = beginProcessing({
       stage: 'search',
       title: `Running ${total} X-Ray ${total === 1 ? 'query' : 'queries'} individually`,
-      status: 'Starting the run on the server…',
+      status: 'Saving the constraints and queries to the session…',
       progress: 0,
-      detail: `Depth: up to ${depth} ${depth === 1 ? 'page' : 'pages'} per query`,
+      detail: `Depth: up to ${runDepth} ${runDepth === 1 ? 'page' : 'pages'} per query`,
       cancelLabel: 'Run in the background',
       cancelNote: 'The search keeps running on the server. Close this and follow it in the progress popup, bottom right.',
       items: queriesToRun.map((q) => ({
@@ -372,21 +372,30 @@ function SourcingDashboard() {
     });
 
     try {
+      // Saved first so edited constraints survive a refused run (no SerpAPI
+      // key, nothing runnable); after an older save, so the two never race.
+      // A failed save is not fatal: the run persists both when it starts.
+      await draftSaveRef.current;
+      await saveDraft(runConstraints, queriesToRun);
+      patchProcessing({ status: 'Starting the run on the server…' });
       // The run is handed to the server and tracked by id. This request returns
       // in milliseconds — the search itself carries on in the background, so
       // closing the overlay or leaving the page costs nothing.
       const runId = await tracker.start({
         jobId: sessionId,
-        constraints,
+        constraints: runConstraints,
         queries: queriesToRun,
         apiKeys: api.readStoredApiKeys(),
-        serpOptions: { maxPagesPerQuery: depth },
+        serpOptions: { maxPagesPerQuery: runDepth },
       });
-      setWatchedRunId(runId);
+      // "Run in the background" pressed before the server answered: leave the
+      // run to the progress popup instead of claiming it for a closed overlay.
+      if (!signal.aborted) setWatchedRunId(runId);
     } catch (e: any) {
-      setProcessing(null);
       endProcessing(e?.message || 'The search run could not be started.', 'error');
       setError(e?.message || 'The search run could not be started.');
+    } finally {
+      startingRef.current = false;
     }
   };
 
@@ -433,18 +442,23 @@ function SourcingDashboard() {
     void (async () => {
       try {
         const fresh = await api.getSession(detail.jobId);
+        // What actually ran, so "Edit queries & re-run" opens on that bundle.
+        setConstraints(fresh.job.merged_constraints);
+        setQueryBundle(fresh.job.query_bundle);
         setCandidates(fresh.candidates);
         setSearchStats(fresh.last_run?.stats ?? { ...EMPTY_STATS, deduplicated: fresh.candidates.length });
         setQueryResults(fresh.last_run?.query_results ?? []);
-        setSelectedPlatform('All');
-        setSelectedMatchTier('All');
+        resetPlatformAndTier();
         setStep('search');
         setSessionUpdatedAt(fresh.job.updated_at);
         const stats = fresh.last_run?.stats;
+        // Why a run stopped short (e.g. the search key ran out of searches) — the
+        // worker records it on the run; without it a halted run reads as a quiet partial.
+        const runError = detail.status === 'partial' || detail.status === 'failed' ? tracker.runs.find((x) => x.runId === detail.runId)?.error : null;
         endProcessing(
           detail.status === 'aborted'
             ? `Run stopped · ${fresh.candidates.length} profiles stored`
-            : `Run ${detail.status === 'partial' ? 'partly complete' : 'complete'} · ${stats?.queriesRun ?? 0} queries · ${stats?.total ?? 0} indexed · ${fresh.candidates.length} profiles stored${stats?.creditsUsed ? ` · ${stats.creditsUsed} credits` : ''}`,
+            : `Run ${detail.status === 'partial' ? 'partly complete' : detail.status === 'failed' ? 'failed' : 'complete'} · ${stats?.queriesRun ?? 0} queries · ${stats?.total ?? 0} indexed · ${fresh.candidates.length} profiles stored${stats?.creditsUsed ? ` · ${stats.creditsUsed} credits` : ''}${runError ? ` · ${runError}` : ''}`,
           detail.status === 'failed' ? 'error' : detail.status === 'partial' ? 'info' : 'success'
         );
       } catch {
@@ -516,23 +530,6 @@ function SourcingDashboard() {
     return t;
   }, [candidates]);
 
-  const filtered = useMemo(() => {
-    const q = searchTerm.toLowerCase();
-    const list = candidates.filter((c) => {
-      const searchMatch = !q || c.name.toLowerCase().includes(q) || c.headline.toLowerCase().includes(q) || c.skills_detected.some((s) => s.toLowerCase().includes(q));
-      const platformMatch = selectedPlatform === 'All' || c.platform === selectedPlatform;
-      const tier = scoreTier(c.match_score);
-      const tierMatch = selectedMatchTier === 'All' || (selectedMatchTier === 'Strong' && tier === 'strong') || (selectedMatchTier === 'Potential' && tier === 'potential') || (selectedMatchTier === 'Low' && tier === 'low');
-      return searchMatch && platformMatch && tierMatch;
-    });
-    list.sort((a, b) => {
-      if (sortBy === 'score') return b.match_score - a.match_score;
-      if (sortBy === 'name') return a.name.localeCompare(b.name);
-      return new Date(b.discovered_at).getTime() - new Date(a.discovered_at).getTime();
-    });
-    return list;
-  }, [candidates, searchTerm, selectedPlatform, selectedMatchTier, sortBy]);
-
   const hasRun = queryResults.length > 0 || candidates.length > 0;
   const stageStates: Record<FlowStageKey, StepState> = {
     ingest: processing?.stage === 'parse' ? 'active' : structuredJD ? 'done' : 'pending',
@@ -553,7 +550,7 @@ function SourcingDashboard() {
       <PageHeader
         eyebrow={sessionId ? `Session${sessionUpdatedAt ? ` · saved ${timeAgo(sessionUpdatedAt)}` : ''}` : 'New search'}
         title={sessionTitle ?? 'Start from a job description'}
-        description={constraintsLine ?? 'Parse a JD, confirm the constraints, then run each approved X-Ray query individually. Every profile the search engine returns is indexed and stored.'}
+        description={constraintsLine ?? 'Parse a JD, adjust the constraints, then find candidates: each approved X-Ray query is searched individually, and every profile the search engine returns is indexed and stored.'}
         actions={
           !sessionId ? (
             <button type="button" onClick={() => void loadDemoRole()} disabled={isLoading} className="btn-ghost">
@@ -576,9 +573,11 @@ function SourcingDashboard() {
                   Edit constraints
                 </button>
               )}
-              {queryBundle.length > 0 && (
-                <button type="button" onClick={() => setIsQueryModalOpen(true)} disabled={isLoading} className="btn-primary">
-                  {hasRun ? 'Re-run queries' : `Review ${queryBundle.length} queries`}
+              {/* The stored bundle. Hidden on the constraints step, where the form's own
+                  Review queries builds from the current (possibly unsaved) edits instead. */}
+              {queryBundle.length > 0 && step !== 'constraints' && (
+                <button type="button" onClick={() => setIsQueryModalOpen(true)} disabled={isLoading || processing !== null} className="btn-primary">
+                  {hasRun ? 'Edit queries & re-run' : 'Review queries'}
                 </button>
               )}
             </>
@@ -621,7 +620,17 @@ function SourcingDashboard() {
         ))}
 
       {step === 'constraints' && structuredJD && constraints && (
-        <ConstraintsForm key={sessionId ?? 'new'} structuredJD={structuredJD} initialConstraints={constraints} onSubmit={handleConstraintsConfirmed} isLoading={isLoading} />
+        <ConstraintsForm
+          key={sessionId ?? 'new'}
+          structuredJD={structuredJD}
+          initialConstraints={constraints}
+          savedQueries={queryBundle}
+          depth={depth}
+          onDepthChange={setDepth}
+          onSearch={handleFormSearch}
+          isLoading={isLoading || processing !== null}
+          disabledReason={searchBusyReason}
+        />
       )}
 
       {step === 'search' && (
@@ -629,7 +638,10 @@ function SourcingDashboard() {
           {/* Stat strip */}
           <div className="card grid grid-cols-2 lg:grid-cols-4 divide-x divide-hairline overflow-hidden">
             <Stat value={searchStats.total} label="Profiles indexed · last run" />
-            <Stat value={candidates.length} label="Stored profiles · all shown" />
+            <Stat
+              value={candidates.length}
+              label={resultFilters.hiddenCount ? `Stored profiles · ${filtered.length} shown` : 'Stored profiles · all shown'}
+            />
             <Stat value={tierCounts.strong} label="Strong matches · 70+" />
             <Stat
               value={searchStats.queriesRun}
@@ -713,7 +725,7 @@ function SourcingDashboard() {
                             <span className="text-ink font-medium">{r.indexedCount}</span> <span className="text-mute">/ {r.resultCount}</span>
                           </td>
                           <td className="text-mute text-body-xs">
-                            {r.provider === 'none' ? '—' : r.provider}
+                            {providerLabel(r.provider)}
                             {r.notice && (
                               <span className="block text-faint" title={r.notice}>
                                 {r.notice.length > 44 ? `${r.notice.slice(0, 44)}…` : r.notice}
@@ -727,7 +739,10 @@ function SourcingDashboard() {
                             {r.status === 'completed' ? (
                               <Check className="w-3.5 h-3.5 text-ink inline" strokeWidth={2.5} />
                             ) : r.status === 'skipped' ? (
-                              <Minus className="w-3.5 h-3.5 text-mute inline" />
+                              <span className="inline-flex items-center gap-1 text-body-xs text-mute max-w-[220px]" title={r.error ?? 'Not run'}>
+                                <Minus className="w-3.5 h-3.5 flex-shrink-0" />
+                                {r.error && <span className="truncate">{r.error.replace(/^Not run — /, '')}</span>}
+                              </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 text-body-xs text-warning-deep max-w-[220px]" title={r.error}>
                                 <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
@@ -744,33 +759,22 @@ function SourcingDashboard() {
             </div>
           )}
 
-          <FilterPanel
-            searchTerm={searchTerm}
-            setSearchTerm={setSearchTerm}
-            selectedPlatform={selectedPlatform}
-            setSelectedPlatform={setSelectedPlatform}
-            selectedMatchTier={selectedMatchTier}
-            setSelectedMatchTier={setSelectedMatchTier}
-            sortBy={sortBy}
-            setSortBy={setSortBy}
-            viewMode={viewMode}
-            setViewMode={setViewMode}
-            totalCount={candidates.length}
-            filteredCount={filtered.length}
-            platformCounts={platformCounts}
-          />
+          <FilterPanel filters={resultFilters} />
 
           {candidates.length === 0 ? (
             <div className="card p-10 flex flex-col items-center text-center gap-2">
               <p className="text-body-md font-medium text-ink">The queries ran, but the search engine indexed no profiles.</p>
               <p className="text-body-sm text-mute max-w-[52ch]">
-                This happens when the free headless search is blocked (add a SerpAPI key in Settings) or the queries are too narrow. Check the receipt above, then broaden
+                This happens when the free headless search is blocked (add a Serper or SerpAPI key in Settings) or the queries are too narrow. Check the receipt above, then broaden
                 the title synonyms, drop a must-have skill, or add platforms and re-run.
               </p>
             </div>
           ) : filtered.length === 0 ? (
-            <div className="card p-10 text-center">
-              <p className="text-body-sm text-mute">No candidates match the current filters.</p>
+            <div className="card p-10 flex flex-col items-center text-center gap-3">
+              <p className="text-body-sm text-mute">No candidates match the current filters · {resultFilters.hiddenCount} hidden.</p>
+              <button type="button" onClick={resultFilters.clearAll} className="btn-ghost">
+                Show all {candidates.length}
+              </button>
             </div>
           ) : (
             <div className={viewMode === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3' : 'flex flex-col gap-2'}>
@@ -787,8 +791,11 @@ function SourcingDashboard() {
         onClose={() => setIsQueryModalOpen(false)}
         queries={queryBundle}
         constraints={constraints}
-        onConfirm={handleRunSearch}
-        isLoading={isLoading}
+        depth={depth}
+        onDepthChange={setDepth}
+        onConfirm={(queries, runDepth) => void handleRunSearch(queries, runDepth)}
+        isLoading={isLoading || processing !== null}
+        runDisabledReason={searchBusyReason}
       />
 
       {selectedCandidate && (

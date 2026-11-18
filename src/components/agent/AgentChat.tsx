@@ -1,15 +1,17 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowUp, Paperclip, ChevronDown, Loader2, Check, ExternalLink, X, PanelRight, Circle, Lock, Sparkles } from 'lucide-react';
 import type { MergedConstraints, XRayQuery } from '@/lib/types';
 import type { AgentMessage, AgentPhase, AgentState, AgentTurnResponse, ScopeItem } from '@/lib/agent/types';
 import { buildScope, decidePhase, EMPTY_STATE, GUARDRAIL } from '@/lib/agent/scope';
+import { generateQueryBundleForConstraints } from '@/lib/ai/client';
 import { postNdjson } from '@/lib/api/stream';
 import * as api from '@/lib/api/sessions';
 import { notifySessionsChanged } from '@/lib/api/sessions';
 import { QueryPreviewModal } from '@/components/ingestion/QueryPreviewModal';
+import { CreditLine, DepthSelect, searchBudget, useSearchDepth } from '@/components/ingestion/SearchBudget';
 import { ProcessingOverlay, ProcessingState, ProcessingLogItem } from '@/components/processing/ProcessingOverlay';
 import { useRunFinished, useRunTracker } from '@/components/runs/RunTracker';
 import { PlatformBadge } from '@/components/platforms/PlatformLogo';
@@ -26,7 +28,10 @@ import { Avatar } from '@/components/ui/Avatar';
 // ---------------------------------------------------------------------------
 
 const STAGE_LABEL: Record<string, string> = { read: 'Reading', extract: 'Extracting', reason: 'Reasoning', queries: 'Building queries', save: 'Saving' };
-const PHASE_LABEL: Record<AgentPhase, string> = { gathering: 'Gathering required scope', scoping: 'Completing the scope', confirming: 'Awaiting your go-ahead', ready: 'Queries ready' };
+const PHASE_LABEL: Record<AgentPhase, string> = { gathering: 'Gathering required scope', scoping: 'Completing the scope', confirming: 'Awaiting your go-ahead', ready: 'Ready to search' };
+/** Go-ahead options that start the search (the old label survives in stored transcripts). */
+const GO_OPTIONS = new Set(['Find candidates', 'Build the queries']);
+const RUNNING_NOTE = 'A search for this session is still running. Follow it in the progress popup, bottom right.';
 
 export function AgentChat() {
   const router = useRouter();
@@ -50,6 +55,14 @@ export function AgentChat() {
   const [runSummary, setRunSummary] = useState<string | null>(null);
   const tracker = useRunTracker();
   const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
+  /** Pages per query; the same per-browser setting as the dashboard. */
+  const [depth, setDepth] = useSearchDepth();
+  /** The assistant message whose bundle this view has already started a search for. */
+  const [runStartedFor, setRunStartedFor] = useState<string | null>(null);
+  /** Set synchronously so a double click can never start two paid runs. */
+  const startingRef = useRef(false);
+  /** Bumped when the overlay is dismissed, so a start that resolves afterwards is left to the popup. */
+  const runTokenRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -58,13 +71,37 @@ export function AgentChat() {
   const ready = phase === 'ready' && queries.length > 0;
   const scope: ScopeItem[] = useMemo(() => (constraints ? buildScope(constraints, state) : []), [constraints, state]);
   const doneCount = scope.filter((s) => s.state === 'done').length;
+  const runningForSession = Boolean(sessionId) && tracker.runs.some((r) => r.jobId === sessionId && r.status === 'running');
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  /** The go-ahead question is the latest message, so its credit line is on screen. */
+  const confirmingOnScreen = phase === 'confirming' && lastAssistant?.phase === 'confirming';
 
-  // Restore a session's conversation.
+  // The ceiling shown with the go-ahead question. The engine builds the bundle
+  // with this same deterministic function once the recruiter says go, so the
+  // number on screen at that click is the number the search is held to.
+  const previewQueries = useMemo(() => (constraints && phase === 'confirming' ? generateQueryBundleForConstraints(constraints) : []), [constraints, phase]);
+  const previewBudget = useMemo(() => searchBudget(previewQueries, constraints, depth), [previewQueries, constraints, depth]);
+  const readyBudget = useMemo(() => searchBudget(queries, constraints, depth), [queries, constraints, depth]);
+
+  // Restore a session's conversation; "New" (no session) starts clean.
   useEffect(() => {
-    if (!sessionParam) return;
+    setRunStartedFor(null);
+    setRunSummary(null);
+    setError(null);
+    if (!sessionParam) {
+      setSessionId(null);
+      setSessionTitle(null);
+      setMessages([]);
+      setConstraints(null);
+      setState(EMPTY_STATE);
+      setQueries([]);
+      return;
+    }
+    let cancelled = false;
     (async () => {
       try {
         const d = await api.getSession(sessionParam);
+        if (cancelled) return;
         setSessionId(sessionParam);
         setSessionTitle(d.job.title);
         setConstraints(d.job.merged_constraints);
@@ -72,64 +109,89 @@ export function AgentChat() {
         setMessages((d.agent_transcript ?? []) as AgentMessage[]);
         setState({ ...EMPTY_STATE, ...((d.agent_state as Partial<AgentState> | null) ?? {}) });
       } catch (e: any) {
-        setError(e?.message || 'Could not open that session.');
+        if (!cancelled) setError(e?.message || 'Could not open that session.');
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [sessionParam]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, busy]);
 
-  const send = useCallback(
-    async (text: string, attach?: File | null) => {
-      const content = text.trim();
-      if (!content && !attach) return;
-      setError(null);
-      setBusy('Sending…');
-      const optimistic: AgentMessage = { id: `tmp-${Date.now()}`, role: 'user', content: content || 'Here is the job description.', at: new Date().toISOString(), ...(attach ? { attachment: { name: attach.name, words: 0 } } : {}) };
-      setMessages((m) => [...m, optimistic]);
-      setDraft('');
-      setFile(null);
-      try {
-        const keys = api.readStoredApiKeys();
-        const headers: Record<string, string> = keys.deepseek ? { 'x-deepseek-api-key': keys.deepseek } : {};
-        let init: RequestInit;
-        if (attach) {
-          const fd = new FormData();
-          fd.append('file', attach);
-          fd.append('text', content);
-          if (sessionId) fd.append('sessionId', sessionId);
-          init = { method: 'POST', body: fd, headers };
-        } else {
-          init = { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId, text: content }) };
-        }
-        const res = await postNdjson<AgentTurnResponse>('/api/agent/turn', init, (ev) => {
-          if (ev.type === 'stage') setBusy(`${STAGE_LABEL[ev.key] ?? ev.key}…`);
-        });
-        setSessionId(res.sessionId);
-        setMessages(res.transcript);
-        setConstraints(res.constraints);
-        setState(res.state);
-        if (res.queries.length) setQueries(res.queries);
-        setSessionTitle(res.constraints.job_title ? `${res.constraints.job_title}${res.constraints.location ? ` · ${res.constraints.location.split(',')[0]}` : ''}` : null);
-        setOpenThoughts((o) => ({ ...o, [res.message.id]: true }));
-        if (!sessionParam || sessionParam !== res.sessionId) router.replace(`/dashboard/agent?session=${encodeURIComponent(res.sessionId)}`);
-        notifySessionsChanged();
-      } catch (e: any) {
-        setMessages((m) => m.filter((x) => x.id !== optimistic.id));
-        setError(e?.message || 'The agent could not respond.');
-      } finally {
-        setBusy(null);
-      }
-    },
-    [sessionId, sessionParam, router]
-  );
-
-  const runSearch = async (queriesToRun: XRayQuery[], depth: number) => {
-    setModalOpen(false);
-    if (!sessionId || !constraints) return;
+  const send = async (text: string, attach?: File | null) => {
+    const content = text.trim();
+    if ((!content && !attach) || busy) return;
+    // Consent before spend: the ceiling on screen when the recruiter answers the
+    // go-ahead question. If this turn confirms the scope, the search starts at
+    // once, but only if the built bundle fits inside that ceiling.
+    const consent = confirmingOnScreen && previewBudget.runnable > 0 && !runningForSession ? { runnable: previewBudget.runnable, depth } : null;
     setError(null);
+    setBusy('Sending…');
+    const optimistic: AgentMessage = { id: `tmp-${Date.now()}`, role: 'user', content: content || 'Here is the job description.', at: new Date().toISOString(), ...(attach ? { attachment: { name: attach.name, words: 0 } } : {}) };
+    setMessages((m) => [...m, optimistic]);
+    setDraft('');
+    setFile(null);
+    try {
+      const keys = api.readStoredApiKeys();
+      const headers: Record<string, string> = keys.deepseek ? { 'x-deepseek-api-key': keys.deepseek } : {};
+      let init: RequestInit;
+      if (attach) {
+        const fd = new FormData();
+        fd.append('file', attach);
+        fd.append('text', content);
+        if (sessionId) fd.append('sessionId', sessionId);
+        init = { method: 'POST', body: fd, headers };
+      } else {
+        init = { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId, text: content }) };
+      }
+      const res = await postNdjson<AgentTurnResponse>('/api/agent/turn', init, (ev) => {
+        if (ev.type === 'stage') setBusy(`${STAGE_LABEL[ev.key] ?? ev.key}…`);
+      });
+      setSessionId(res.sessionId);
+      setMessages(res.transcript);
+      setConstraints(res.constraints);
+      setState(res.state);
+      if (res.queries.length) setQueries(res.queries);
+      setSessionTitle(res.constraints.job_title ? `${res.constraints.job_title}${res.constraints.location ? ` · ${res.constraints.location.split(',')[0]}` : ''}` : null);
+      setOpenThoughts((o) => ({ ...o, [res.message.id]: true }));
+      if (!sessionParam || sessionParam !== res.sessionId) router.replace(`/dashboard/agent?session=${encodeURIComponent(res.sessionId)}`);
+      notifySessionsChanged();
+
+      // Only this live turn can start a search, never a restored transcript.
+      if (consent && res.ready && res.phase === 'ready' && res.queries.length > 0) {
+        const built = searchBudget(res.queries, res.constraints, consent.depth);
+        if (built.runnable > 0 && built.runnable <= consent.runnable) {
+          void runSearch(res.queries, consent.depth, { sessionId: res.sessionId, constraints: res.constraints, messageId: res.message.id });
+        }
+        // Otherwise the scope moved past what was shown: the ready message offers
+        // Find candidates with the new ceiling, and nothing is spent until it is clicked.
+      }
+    } catch (e: any) {
+      setMessages((m) => m.filter((x) => x.id !== optimistic.id));
+      setError(e?.message || 'The agent could not respond.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runSearch = async (
+    queriesToRun: XRayQuery[],
+    runDepth: number,
+    ctx: { sessionId?: string | null; constraints?: MergedConstraints | null; messageId?: string | null } = {}
+  ) => {
+    setModalOpen(false);
+    // Passed explicitly by a turn that just finished: its state updates are not visible here yet.
+    const jobId = ctx.sessionId ?? sessionId;
+    const runConstraints = ctx.constraints ?? constraints;
+    if (!jobId || !runConstraints || startingRef.current) return;
+    startingRef.current = true;
+    const token = ++runTokenRef.current;
+    setError(null);
+    setRunSummary(null);
+    setQueries(queriesToRun);
     const items: ProcessingLogItem[] = queriesToRun.map((q) => ({
       id: q.id,
       platform: q.platform,
@@ -139,9 +201,10 @@ export function AgentChat() {
     }));
     setProcessing({
       stage: 'search',
-      title: `Running ${queriesToRun.length} X-Ray queries individually`,
+      title: `Running ${queriesToRun.length} X-Ray ${queriesToRun.length === 1 ? 'query' : 'queries'} individually`,
       status: 'Starting the run on the server…',
       progress: 0,
+      detail: `Depth: up to ${runDepth} ${runDepth === 1 ? 'page' : 'pages'} per query`,
       cancelLabel: 'Run in the background',
       cancelNote: 'The search keeps running on the server. Close this and follow it in the progress popup, bottom right.',
       items,
@@ -150,16 +213,19 @@ export function AgentChat() {
     try {
       // Handed to the server as a background run: this resolves immediately.
       const runId = await tracker.start({
-        jobId: sessionId,
-        constraints,
+        jobId,
+        constraints: runConstraints,
         queries: queriesToRun,
         apiKeys: api.readStoredApiKeys(),
-        serpOptions: { maxPagesPerQuery: depth },
+        serpOptions: { maxPagesPerQuery: runDepth },
       });
-      setWatchedRunId(runId);
+      setRunStartedFor(ctx.messageId ?? null);
+      if (runTokenRef.current === token) setWatchedRunId(runId);
     } catch (e: any) {
       setProcessing(null);
       setError(e?.message || 'The search run could not be started.');
+    } finally {
+      startingRef.current = false;
     }
   };
 
@@ -197,8 +263,11 @@ export function AgentChat() {
 
   useRunFinished((detail) => {
     if (detail.jobId !== sessionId) return;
-    if (detail.runId === watchedRunId) setWatchedRunId(null);
-    setProcessing(null);
+    // Close the overlay only for the run it shows (or when it shows none).
+    if (detail.runId === watchedRunId || (!watchedRunId && !startingRef.current)) {
+      setWatchedRunId(null);
+      setProcessing(null);
+    }
     const run = tracker.runs.find((r) => r.runId === detail.runId);
     setRunSummary(run?.statusText ?? 'Run finished.');
   });
@@ -209,8 +278,6 @@ export function AgentChat() {
       void send(draft, file);
     }
   };
-
-  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
 
   return (
     <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
@@ -244,7 +311,7 @@ export function AgentChat() {
                 <div>
                   <p className="text-heading-md">Describe the role, or attach the JD.</p>
                   <p className="text-body-sm text-mute mt-1 max-w-[52ch]">
-                    I gather the full scope first, show my reasoning at every step, and only build queries once you confirm — searches cost credits.
+                    I gather the full scope first, show my reasoning at every step, and only search once you say go, with the credit ceiling shown before you do.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2 justify-center max-w-[640px]">
@@ -300,7 +367,13 @@ export function AgentChat() {
                       <div className="flex flex-wrap gap-1.5">
                         {m.questions.flatMap((q) =>
                           (q.options ?? []).map((o) => (
-                            <button key={`${q.id}-${o}`} type="button" onClick={() => void send(o)} className={o === 'Build the queries' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}>
+                            <button
+                              key={`${q.id}-${o}`}
+                              type="button"
+                              onClick={() => void send(o)}
+                              disabled={busy !== null || (GO_OPTIONS.has(o) && (previewBudget.runnable === 0 || runningForSession))}
+                              className={GO_OPTIONS.has(o) ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                            >
                               {o}
                             </button>
                           ))
@@ -308,16 +381,57 @@ export function AgentChat() {
                       </div>
                     </div>
                   )}
-                  {m.role === 'assistant' && m.ready && m.id === lastAssistant?.id && queries.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button type="button" onClick={() => setModalOpen(true)} className="btn-primary">
-                        Review {queries.length} queries
-                      </button>
-                      <button type="button" onClick={() => router.push(`/dashboard?session=${encodeURIComponent(sessionId ?? '')}`)} className="btn-ghost">
-                        Open in dashboard <ExternalLink className="w-3.5 h-3.5" />
-                      </button>
+                  {/* Consent before spend: the ceiling is on screen at the go-ahead, clicked or typed. */}
+                  {m.role === 'assistant' && m.id === lastAssistant?.id && confirmingOnScreen && (
+                    <div className="flex flex-col gap-1.5 w-full rounded-sm border border-hairline bg-canvas px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                        <DepthSelect depth={depth} onChange={setDepth} compact />
+                        <CreditLine budget={previewBudget} className="text-ink" />
+                      </div>
+                      <span className="text-body-xs text-mute">
+                        {runningForSession
+                          ? RUNNING_NOTE
+                          : previewBudget.runnable === 0
+                            ? `No query can run yet: ${previewBudget.firstSkipReason ?? 'every query fails validation'}. Change something first.`
+                            : 'Saying go starts the search straight away, within this ceiling. Each query is searched individually.'}
+                      </span>
                     </div>
                   )}
+                  {m.role === 'assistant' && m.ready && m.id === lastAssistant?.id && queries.length > 0 &&
+                    (runStartedFor === m.id ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={() => router.push(`/dashboard?session=${encodeURIComponent(sessionId ?? '')}`)} className="btn-primary">
+                          Open results
+                        </button>
+                        <button type="button" onClick={() => setModalOpen(true)} disabled={processing !== null || runningForSession} className="btn-ghost">
+                          Edit queries &amp; re-run
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-2 w-full">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void runSearch(queries, depth, { messageId: m.id })}
+                            disabled={processing !== null || runningForSession || readyBudget.runnable === 0}
+                            className="btn-primary"
+                          >
+                            Find candidates
+                          </button>
+                          <button type="button" onClick={() => setModalOpen(true)} className="btn-ghost">
+                            Review queries
+                          </button>
+                          <button type="button" onClick={() => router.push(`/dashboard?session=${encodeURIComponent(sessionId ?? '')}`)} className="btn-ghost">
+                            Open in dashboard <ExternalLink className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                          <DepthSelect depth={depth} onChange={setDepth} compact />
+                          <CreditLine budget={readyBudget} />
+                        </div>
+                        {runningForSession && <span className="text-body-xs text-mute">{RUNNING_NOTE}</span>}
+                      </div>
+                    ))}
                 </div>
               </div>
             ))}
@@ -470,8 +584,8 @@ export function AgentChat() {
                 Edit in the form
               </button>
               {ready && (
-                <button type="button" onClick={() => setModalOpen(true)} className="btn-primary flex-1">
-                  Review {queries.length} queries
+                <button type="button" onClick={() => setModalOpen(true)} className="btn-ghost flex-1">
+                  Review queries
                 </button>
               )}
             </div>
@@ -479,10 +593,21 @@ export function AgentChat() {
         </aside>
       )}
 
-      <QueryPreviewModal isOpen={modalOpen} onClose={() => setModalOpen(false)} queries={queries} constraints={constraints} onConfirm={runSearch} isLoading={processing !== null} />
+      <QueryPreviewModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        queries={queries}
+        constraints={constraints}
+        depth={depth}
+        onDepthChange={setDepth}
+        onConfirm={(qs, runDepth) => void runSearch(qs, runDepth, { messageId: lastAssistant?.id ?? null })}
+        isLoading={processing !== null}
+        runDisabledReason={runningForSession ? RUNNING_NOTE : null}
+      />
       <ProcessingOverlay
         state={processing}
         onCancel={() => {
+          runTokenRef.current += 1;
           setProcessing(null);
           setWatchedRunId(null);
         }}

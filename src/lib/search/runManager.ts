@@ -1,10 +1,12 @@
 import { getDeadline, waitUntil } from '@vercel/functions';
 import { mapWithConcurrency, sanitizeQueries, searchOneQuery, SERP_CONCURRENCY } from './x-raySearchService';
-import { glFromTld, resolveSerpOptions } from './serpConfig';
+import { resolveSerpOptions } from './serpConfig';
 import { queryLabel } from './xrayTemplates';
 import { platformLabel } from './platforms';
-import { parseLocation } from './location';
 import { validateBundle } from './queryValidation';
+import { resolveSearchGeo } from './providers/geo';
+import { providerChain } from './providers';
+import { createProviderRunState, type DeadProvider } from './providers/runState';
 import {
   claimRun,
   createRunRow,
@@ -16,11 +18,13 @@ import {
   loadRunWork,
   markQueryDone,
   markQueryStart,
+  recordExhaustedProvider,
+  skipPendingQueries,
   recordResume,
   releaseRun,
 } from '../db/searchRuns';
 import { persistQueryCandidates, updateSession } from '../db/sessions';
-import { getProviderKey } from '../credentials';
+import { resolveSearchKeys, type SearchKeys } from '../credentials';
 import { prisma } from '../db/client';
 import type { SerpOptions } from './serpConfig';
 import type { MergedConstraints, XRayQuery } from '../types';
@@ -51,10 +55,26 @@ import type { MergedConstraints, XRayQuery } from '../types';
 /** A heartbeat older than this means the worker is gone and the run may be taken over. */
 const LEASE_MS = 45_000;
 const HEARTBEAT_MS = 15_000;
-/** Stop starting new queries when less than this is left before the invocation deadline. */
-const START_CUTOFF_MS = 90_000;
-/** And stop paging within a query when less than this is left. */
-const PAGE_CUTOFF_MS = 45_000;
+/**
+ * Time budget for ONE query under an invocation deadline: every attempt,
+ * retry, fallback, page and relaxation of the query fits inside it (see
+ * runSerpQuery). On a long-lived server there is no deadline, so a slow
+ * provider may use more of it before paging stops.
+ */
+const SERVERLESS_QUERY_BUDGET_MS = 70_000;
+const LONG_LIVED_QUERY_BUDGET_MS = 90_000;
+/** Time kept back after the last SERP call to store its profiles and update the receipt. */
+const PERSIST_MARGIN_MS = 15_000;
+/**
+ * Stop starting new queries when less than this is left before the deadline.
+ * Budget + margin, so a query that starts always lands before the invocation
+ * is killed. Worst case (every query using its whole budget), maxDuration 300,
+ * concurrency 3, 10 queries x 5 pages: waves start at ~5/76/147 s, the tenth
+ * query is handed back at ~219 s and finishes in the next invocation — about
+ * 296 s wall time in total. On a long-lived server (90 s budget, no deadline)
+ * the same worst case is ~370 s.
+ */
+const START_CUTOFF_MS = SERVERLESS_QUERY_BUDGET_MS + PERSIST_MARGIN_MS;
 /** A run that keeps dying is failed rather than retried forever. */
 const MAX_RESUMES = 12;
 
@@ -66,7 +86,10 @@ export interface StartRunInput {
   userId: string;
   constraints: MergedConstraints;
   queries: XRayQuery[];
-  keys: { serpapi: string; deepseek?: string | null };
+  /** Search keys checked by the route (at least one present). DeepSeek is unused by the worker. */
+  keys: { serpapi?: string | null; serper?: string | null; deepseek?: string | null };
+  /** Providers the route's pre-flight found unusable (rejected key, empty account), with the reason. */
+  unusableProviders?: Partial<Record<'serpapi' | 'serper', DeadProvider>>;
   serpOptions?: Partial<SerpOptions> | null;
 }
 
@@ -98,9 +121,10 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
   });
 
   const opts = resolveSerpOptions(input.serpOptions ?? undefined);
-  const loc = parseLocation(input.constraints.location);
-  // A remote role searches from SerpAPI's default vantage point; a city-bound one from its country.
-  const gl = loc.cities.length || (loc.country && !input.constraints.remote_eligible) ? glFromTld(loc.tld) : '';
+  // Where every call of this run searches from: the requisition's country
+  // (gl / google_domain) and, for a city-bound role, the city; remote with no
+  // country uses the provider's default. Frozen into the run so resumes match.
+  const geo = await resolveSearchGeo(input.constraints.location, Boolean(input.constraints.remote_eligible));
 
   let runId: string;
   try {
@@ -109,7 +133,7 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
       userId: input.userId,
       queries: input.queries,
       resultsCap: input.constraints.results_cap ?? 50,
-      config: { maxPagesPerQuery: opts.maxPagesPerQuery, engine: opts.engine, gl },
+      config: { maxPagesPerQuery: opts.maxPagesPerQuery, engine: opts.engine, ...geo, exhausted: input.unusableProviders ?? {} },
       blocked,
     });
   } catch (err) {
@@ -120,7 +144,7 @@ export async function startSearchRun(input: StartRunInput): Promise<string> {
     throw err;
   }
 
-  schedule(runId, input.keys.serpapi);
+  schedule(runId, { serpapi: input.keys.serpapi ?? null, serper: input.keys.serper ?? null });
   return runId;
 }
 
@@ -137,10 +161,10 @@ export async function resumeStalledRuns(userId: string): Promise<void> {
   }
 }
 
-function schedule(runId: string, serpapiKey: string | null, resumed = false): void {
+function schedule(runId: string, keys: Pick<SearchKeys, 'serpapi' | 'serper'> | null, resumed = false): void {
   if (inFlight.has(runId)) return;
   inFlight.add(runId);
-  const work = driveRun(runId, serpapiKey, resumed)
+  const work = driveRun(runId, keys, resumed)
     .catch(async (err: any) => {
       console.error(`Search run ${runId} failed:`, err);
       const row = await prisma.searchRun.findUnique({ where: { id: runId }, select: { jobId: true } }).catch(() => null);
@@ -152,7 +176,7 @@ function schedule(runId: string, serpapiKey: string | null, resumed = false): vo
   waitUntil(work);
 }
 
-async function driveRun(runId: string, serpapiKey: string | null, resumed: boolean): Promise<void> {
+async function driveRun(runId: string, givenKeys: Pick<SearchKeys, 'serpapi' | 'serper'> | null, resumed: boolean): Promise<void> {
   const work = await loadRunWork(runId);
   if (!work || work.status !== 'running') return;
 
@@ -169,11 +193,17 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
     return;
   }
 
-  const serpapi = serpapiKey ?? (work.userId ? await getProviderKey(work.userId, 'serpapi') : null) ?? process.env.SERPAPI_KEY ?? null;
-  if (!serpapi) {
-    await failRun(runId, work.jobId, 'No SerpAPI key on file. Add one in Settings, then run the search again.');
+  // The keys the route checked, or — on a resume in a fresh invocation — the
+  // same resolution again (the recruiter's own keys, else the platform's).
+  const keys = givenKeys ?? (await resolveSearchKeys(work.userId));
+  const chain = providerChain(keys);
+  if (chain.length === 0) {
+    await failRun(runId, work.jobId, 'No search key on file. Add a SerpAPI or Serper key in Settings, then run the search again.');
     return;
   }
+  // Providers this run already found unusable (no credits, hourly cap, bad
+  // key) stay unusable after a resume instead of being retried per query.
+  const providers = createProviderRunState(chain, work.config.exhausted);
 
   const deadline = getDeadline()?.getTime() ?? 0;
   const timeLeft = () => (deadline ? deadline - Date.now() : Number.POSITIVE_INFINITY);
@@ -181,7 +211,11 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
     engine: work.config.engine === 'google_light' ? 'google_light' : 'google',
     maxPagesPerQuery: work.config.maxPagesPerQuery,
     gl: work.config.gl,
-    stopAt: deadline ? deadline - PAGE_CUTOFF_MS : 0,
+    hl: work.config.hl,
+    googleDomain: work.config.googleDomain,
+    location: work.config.location,
+    stopAt: deadline ? deadline - PERSIST_MARGIN_MS : 0,
+    queryBudgetMs: deadline ? SERVERLESS_QUERY_BUDGET_MS : LONG_LIVED_QUERY_BUDGET_MS,
   };
 
   const beat = setInterval(() => void heartbeat(runId).catch(() => {}), HEARTBEAT_MS);
@@ -189,13 +223,21 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
   // create the same person (see persistQueryCandidates).
   let writes: Promise<unknown> = Promise.resolve();
   let deferred = 0;
+  const recorded = new Set<string>();
 
   try {
     await mapWithConcurrency(work.pending, SERP_CONCURRENCY, async (q) => {
       // Stopping is checked here rather than mid-flight: a query already sent
-      // to SerpAPI is already paid for, so we let it land and refuse the next.
+      // is already paid for, so we let it land and refuse the next.
       if (await isAbortRequested(runId)) {
         await markQueryDone(runId, skippedOutcome(q, 'Not run — the search was stopped.'));
+        return;
+      }
+      // Every search key is out of credits / over its hourly cap / rejected:
+      // the remaining queries are closed out at once with the reason, not
+      // each sent to fail on its own retries.
+      if (providers.halted) {
+        await markQueryDone(runId, { ...skippedOutcome(q, `Not run — ${providers.halted.message}`), code: providers.halted.kind });
         return;
       }
       if (timeLeft() < START_CUTOFF_MS) {
@@ -203,8 +245,12 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
         return;
       }
       await markQueryStart(runId, q.id, `Searching ${platformLabel(q.platform)} · ${queryLabel(q.query_type)}…`).catch(() => {});
-      const { outcome, candidates } = await searchOneQuery(q, work.constraints, work.jobId, { serpapi }, serpOptions);
-      const tier = outcome.provider === 'serpapi' ? 'precision' : 'free';
+      const { outcome, candidates } = await searchOneQuery(q, work.constraints, work.jobId, keys, serpOptions, { providerState: providers });
+      if (outcome.fatal && !recorded.has(outcome.fatal.provider)) {
+        recorded.add(outcome.fatal.provider);
+        await recordExhaustedProvider(runId, outcome.fatal.provider, outcome.fatal.kind, outcome.fatal.message).catch(() => {});
+      }
+      const tier = outcome.provider === 'serpapi' || outcome.provider === 'serper' ? 'precision' : 'free';
       writes = writes.then(() => persistQueryCandidates(work.jobId, runId, tier, candidates)).catch((err) => {
         console.error(`Storing profiles for query ${q.id} of run ${runId} failed:`, err);
       });
@@ -215,12 +261,18 @@ async function driveRun(runId: string, serpapiKey: string | null, resumed: boole
     clearInterval(beat);
   }
 
-  if (deferred > 0) {
+  if (providers.halted) {
+    // Anything deferred before the halt was decided is closed out too, so no
+    // row is left pending behind a finished run.
+    await skipPendingQueries(runId, `Not run — ${providers.halted.message}`, providers.halted.kind);
+  } else if (deferred > 0) {
     // Out of time in this invocation: hand the run back so the next poll resumes it.
     await releaseRun(runId, LEASE_MS, `Continuing… ${deferred} ${deferred === 1 ? 'query' : 'queries'} left`);
     return;
   }
-  await finalizeRun(runId, work.jobId);
+  // A provider switch mid-run is worth one line on the receipt header.
+  const switchNote = providers.events.length ? providers.events.join(' ') : null;
+  await finalizeRun(runId, work.jobId, providers.halted?.message ?? null, switchNote);
 }
 
 function skippedOutcome(q: XRayQuery, notice: string) {

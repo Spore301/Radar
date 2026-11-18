@@ -7,9 +7,10 @@ import { RadrLogo } from '@/components/brand/RadrLogo';
 
 // ---------------------------------------------------------------------------
 // Three questions, one screen at a time: who you are, which organisation your
-// outreach speaks for, and the SerpAPI key that will pay for searches. The key
-// is verified against SerpAPI before it is stored, and the plan's remaining
-// searches are shown — free accounts are small, so people rotate them.
+// outreach speaks for, and the search key that will pay for searches — Serper
+// or SerpAPI, either works. The key is verified against the provider's free
+// account endpoint before it is stored, and what is left on the account is
+// shown. A second key can be added in Settings as a fallback.
 // ---------------------------------------------------------------------------
 
 interface Props {
@@ -21,15 +22,43 @@ interface Props {
 type Step = 'name' | 'company' | 'key';
 const ORDER: Step[] = ['name', 'company', 'key'];
 
+type SearchProvider = 'serper' | 'serpapi';
+
+const PROVIDER_COPY: Record<SearchProvider, { label: string; field: string; body: string; href: string; placeholder: string }> = {
+  serper: {
+    label: 'Serper',
+    field: 'serper_key',
+    body: 'Google results in 1–2 seconds, one credit per results page. New accounts include free queries.',
+    href: 'https://serper.dev/api-key',
+    placeholder: 'Serper API key',
+  },
+  serpapi: {
+    label: 'SerpAPI',
+    field: 'serpapi_key',
+    body: 'One credit per results page. Free accounts include a limited number of searches per month; swap the key in Settings any time you switch accounts.',
+    href: 'https://serpapi.com/manage-api-key',
+    placeholder: '64-character key',
+  },
+};
+
+interface Verified {
+  last4: string;
+  searchesLeft?: number;
+  planName?: string;
+  balance?: number;
+}
+
 export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
   const router = useRouter();
   const [step, setStep] = useState<Step>('name');
   const [name, setName] = useState(initialName);
   const [company, setCompany] = useState(initialCompany);
+  const [provider, setProvider] = useState<SearchProvider>('serper');
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [verified, setVerified] = useState<{ last4: string; searchesLeft?: number; planName?: string } | null>(null);
+  const [verified, setVerified] = useState<Verified | null>(null);
+  const copy = PROVIDER_COPY[provider];
 
   const index = ORDER.indexOf(step);
 
@@ -53,8 +82,9 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
         await save({ company });
         setStep('key');
       } else {
-        const data = await save({ serpapi_key: key.trim() || undefined, complete: true });
-        if (data.serpapi) setVerified(data.serpapi);
+        const data = await save({ [copy.field]: key.trim() || undefined, complete: true });
+        const v = provider === 'serpapi' ? data.serpapi : data.serper;
+        if (v) setVerified(v);
         router.replace('/dashboard');
         return;
       }
@@ -69,8 +99,8 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
     setError(null);
     setBusy(true);
     try {
-      const data = await save({ serpapi_key: key.trim() });
-      setVerified(data.serpapi ?? null);
+      const data = await save({ [copy.field]: key.trim() });
+      setVerified((provider === 'serpapi' ? data.serpapi : data.serper) ?? null);
     } catch (e: any) {
       setError(e?.message || 'Could not verify the key.');
     } finally {
@@ -137,17 +167,38 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
             <>
               <div>
                 <span className="eyebrow">Question 3</span>
-                <h1 className="text-heading-md mt-1">Your SerpAPI key</h1>
+                <h1 className="text-heading-md mt-1">Your search key</h1>
                 <p className="text-body-sm text-mute mt-1">
-                  Searches run through your SerpAPI account, one credit per results page. Free accounts include a limited number of searches per month; swap the key in
-                  Settings any time you switch accounts.{' '}
-                  <a href="https://serpapi.com/manage-api-key" target="_blank" rel="noreferrer" className="text-link hover:underline">
+                  Searches run through your own account with a Google-results provider. Choose one; you can add the other in Settings as a fallback.
+                </p>
+              </div>
+              <div className="flex flex-col gap-2">
+                <div className="seg self-start" role="group" aria-label="Search provider">
+                  {(['serper', 'serpapi'] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="seg-item"
+                      aria-pressed={provider === p}
+                      onClick={() => {
+                        setProvider(p);
+                        setVerified(null);
+                        setError(null);
+                      }}
+                    >
+                      {PROVIDER_COPY[p].label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-body-sm text-mute">
+                  {copy.body}{' '}
+                  <a href={copy.href} target="_blank" rel="noreferrer" className="text-link hover:underline">
                     Get a key
                   </a>
                 </p>
               </div>
               <label className="flex flex-col gap-1.5">
-                <span className="field-label">SerpAPI key</span>
+                <span className="field-label">{copy.label} key</span>
                 <div className="flex gap-2">
                   <input
                     autoFocus
@@ -159,7 +210,7 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
                       setKey(e.target.value);
                       setVerified(null);
                     }}
-                    placeholder="64-character key"
+                    placeholder={copy.placeholder}
                   />
                   <button type="button" onClick={() => void verify()} disabled={busy || key.trim().length < 8} className="btn-ghost btn-lg flex-shrink-0">
                     {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Verify'}
@@ -172,11 +223,12 @@ export function OnboardingFlow({ initialName, initialCompany, email }: Props) {
                   <span>
                     Key ending in <span className="font-mono">{verified.last4}</span> works
                     {verified.planName ? ` · ${verified.planName}` : ''}
-                    {typeof verified.searchesLeft === 'number' ? ` · ${verified.searchesLeft.toLocaleString()} searches left this month` : ''}.
+                    {typeof verified.searchesLeft === 'number' ? ` · ${verified.searchesLeft.toLocaleString()} searches left this month` : ''}
+                    {typeof verified.balance === 'number' ? ` · ${verified.balance.toLocaleString()} credits left` : ''}.
                   </span>
                 </div>
               )}
-              <p className="text-body-xs text-mute">You can skip this and add the key in Settings, but searches will return nothing until one is on file.</p>
+              <p className="text-body-xs text-mute">You can skip this and add a key in Settings, but searches cannot run until one is on file.</p>
             </>
           )}
 

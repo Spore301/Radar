@@ -136,11 +136,11 @@ const REMOTE_RE = /\b(remote|work from home|wfh|distributed|anywhere)\b/i;
 const WORK_MODE_RE = /\b(remote|work from home|wfh|distributed|anywhere|hybrid|on-?site|in[- ]office|wfo)\b/gi;
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const cityAliasIndex: Array<{ re: RegExp; city: KnownCity }> = CITIES.flatMap((city) =>
+const cityAliasIndex: Array<{ re: RegExp; city: KnownCity; alias: string }> = CITIES.flatMap((city) =>
   city.aliases
     .slice()
     .sort((a, b) => b.length - a.length)
-    .map((alias) => ({ re: new RegExp(`(?<![\\w-])${escape(alias)}(?![\\w-])`, 'i'), city }))
+    .map((alias) => ({ re: new RegExp(`(?<![\\w-])${escape(alias)}(?![\\w-])`, 'i'), city, alias }))
 );
 const countryAliasIndex: Array<{ re: RegExp; country: CountryInfo }> = COUNTRIES.flatMap((c) =>
   c.aliases.map((alias) => ({ re: new RegExp(`(?<![\\w-])${escape(alias)}(?![\\w-])`, 'i'), country: c }))
@@ -257,6 +257,68 @@ export function parseLocation(raw: string | null | undefined): ParsedLocation {
     searchTerms,
   };
 }
+
+/** "nyc" → "NYC", "bangalore" → "Bangalore": how an alias reads in a query. */
+function aliasDisplay(alias: string): string {
+  return alias.length <= 3 ? alias.toUpperCase() : alias.replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+/**
+ * Location terms for a search string, ordered so trimming keeps meaning:
+ * every city's canonical name first (LinkedIn prints the canonical name —
+ * "Bengaluru, Karnataka, India"), then unknown towns, then one alternate
+ * spelling per city. A term that contains another kept term as a whole word
+ * ("Greater London" next to "London", "New Delhi" next to "Delhi") is
+ * dropped: the shorter phrase already matches every page the longer one does.
+ */
+export function queryLocationTerms(parsed: ParsedLocation, max = 4): string[] {
+  const names = parsed.cities.map((c) => c.name);
+  const alts = parsed.cities
+    .map((c) => c.aliases.find((a) => a.toLowerCase() !== c.name.toLowerCase() && a.length > 2))
+    .filter((a): a is string => Boolean(a))
+    .map(aliasDisplay);
+  const ordered = uniqCI([...names, ...parsed.unknown, ...alts]);
+  const kept: string[] = [];
+  for (const term of ordered) {
+    const lower = term.toLowerCase();
+    const covered = kept.some((k) => new RegExp(`(?<![\\w-])${escape(k.toLowerCase())}(?![\\w-])`).test(lower));
+    if (!covered) kept.push(term);
+  }
+  return kept.slice(0, max);
+}
+
+/**
+ * The countries a location string pins a search to: each city's country plus
+ * an explicitly named one, de-duplicated. One entry means the role is bound to
+ * one country (city-bound, "India", "Remote (India)"); zero means no country
+ * ("Remote", unknown town); several mean a multi-country role.
+ */
+export function locationCountries(parsed: ParsedLocation): CountryInfo[] {
+  const out: CountryInfo[] = [];
+  for (const c of parsed.cities) {
+    const info = COUNTRIES.find((x) => x.name === c.country);
+    if (info && !out.includes(info)) out.push(info);
+  }
+  if (parsed.country && !out.includes(parsed.country)) out.push(parsed.country);
+  return out;
+}
+
+/** The known country a piece of text names as a whole word ("India", "UK", "Deutschland"), or null. */
+export function findCountryInText(text: string): CountryInfo | null {
+  return countryAliasIndex.find(({ re }) => re.test(text))?.country ?? null;
+}
+
+/** The known city a location fragment names, by alias, or null. Short aliases (≤3 letters) are ignored unless `allowShort`. */
+export function findCityInText(text: string, allowShort = false): KnownCity | null {
+  for (const { re, city, alias } of cityAliasIndex) {
+    if (!allowShort && alias.length <= 3) continue;
+    if (re.test(text)) return city;
+  }
+  return null;
+}
+
+/** State / region names the city table knows ("Karnataka", "Bavaria"), lower-cased. */
+export const KNOWN_REGIONS: ReadonlySet<string> = new Set(CITIES.map((c) => c.region?.toLowerCase()).filter((r): r is string => Boolean(r)));
 
 /** First known city mentioned anywhere in a body of text (a JD), or null. */
 export function detectCityInText(text: string): KnownCity | null {

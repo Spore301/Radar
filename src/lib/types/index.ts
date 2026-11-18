@@ -145,6 +145,41 @@ export interface MatchBreakdown {
   organization_score?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Candidate facets — SHARED CONTRACT (search engine produces, filters consume).
+//
+// Normalised, filterable fields derived ONLY from what the search result shows
+// (URL, title, snippet). Never fetched, never guessed: a field with no evidence
+// is null. Produced by `deriveCandidateFacets` in src/lib/search/facets.ts at
+// index time and, for rows stored before facets existed, on the fly.
+// ---------------------------------------------------------------------------
+
+/** Which piece of the search result a location fact came from. */
+export type FacetEvidence = 'snippet' | 'title' | 'url_subdomain' | 'none';
+
+export interface CandidateLocationFacets {
+  /** Canonical city name from the location table ("Bengaluru"), or null. */
+  city: string | null;
+  /** State / province / region ("Karnataka"), or null. */
+  region: string | null;
+  /** Country display name ("India", "United Kingdom"), or null. */
+  country: string | null;
+  /** ISO 3166-1 alpha-2, lower-case ("in", "gb"), or null. */
+  country_code: string | null;
+  /** Evidence behind the most specific non-null field. */
+  source: FacetEvidence;
+}
+
+export interface CandidateFacets {
+  location: CandidateLocationFacets;
+  /** Current job title as the result states it, or null. */
+  current_title: string | null;
+  /** Current employer as the result states it, or null. */
+  current_company: string | null;
+  /** Seniority word found in the headline/title, or null. */
+  seniority: SeniorityLevel | null;
+}
+
 export interface CandidateProfile {
   id: string;
   job_id: string;
@@ -163,6 +198,11 @@ export interface CandidateProfile {
   missing_signals: string[];
   /** The target organisation found on the profile (title or snippet), when one was required. */
   organization_match?: string | null;
+  /**
+   * Normalised filterable facets (see CandidateFacets). Absent on rows stored
+   * before facets existed — consumers fall back to deriveCandidateFacets().
+   */
+  facets?: CandidateFacets | null;
   data_completeness: number; // 0-1
   raw_scraped_data?: Record<string, any>;
   source_query?: string;

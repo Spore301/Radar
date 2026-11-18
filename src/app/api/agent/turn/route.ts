@@ -4,7 +4,8 @@ import { ndjsonResponse } from '@/lib/api/ndjson';
 import { runAgentTurn } from '@/lib/agent/engine';
 import { extractTextFromBuffer } from '@/lib/extractors/jdTextExtractor';
 
-// A confirmed turn plans queries with the reasoning model.
+// A turn's DeepSeek extraction call may retry (2 × 75 s). A confirmed turn
+// builds its queries instantly from the templates, with no planner call.
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 

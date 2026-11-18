@@ -77,8 +77,12 @@ HOW GOOGLE AND THESE PAGES ACTUALLY BEHAVE (facts, not style)
   snippet usually starts with the profile's location ("Bengaluru, Karnataka, India · …"). So: the job title
   is the single strongest LinkedIn signal; intitle:"Title" (or intitle:("A" OR "B")) is high precision;
   putting the city as a plain term is reliable; the current employer is in the title, past ones are not.
-- LinkedIn serves country subdomains (in.linkedin.com, uk.linkedin.com, de.linkedin.com …).
-  site:linkedin.com/in/ matches all of them. Do not restrict to a subdomain — use the city/region terms.
+- LinkedIn serves each member's public profile from their country's subdomain (in.linkedin.com for India,
+  uk., de., ca., ae., sg. …), and Google indexes it under that host; US profiles live on www.linkedin.com.
+  site:linkedin.com/in/ matches every country, so for a single-country role it returns many people
+  abroad. Use the host <HINTS> gives under "LinkedIn geography" on EVERY LinkedIn query (and in the
+  LinkedIn arm of a MultiSite group). For a city-bound role, also put the city spellings on every LinkedIn
+  query; for a country-wide or remote-in-country role the host alone is the location filter.
 - LinkedIn /in/ pages are HTML. "site:linkedin.com/in/ … filetype:pdf" returns nothing — never write it.
 - GitHub: people are github.com/<user>; repo pages collapse to their owner. Bios and READMEs carry
   languages, frameworks and sometimes a city. Only useful for roles with code-level skills.
@@ -93,7 +97,8 @@ HOW GOOGLE AND THESE PAGES ACTUALLY BEHAVE (facts, not style)
 - Ambiguous one-word skills match everything: write "Golang" not "Go", "Apache Spark" not "Spark",
   "R programming" or "RStudio" not "R", "Java" is fine, "C" never. Generic skills (SQL, Excel, Git, REST,
   Agile, Jira, "communication") barely narrow anything — prefer the rare, specific must-haves.
-- "Remote" as a query term matches nearly every profile. Never use it. For a remote role, drop location.
+- "Remote" as a query term matches nearly every profile. Never use it. For a remote role, drop the city
+  (keep the LinkedIn country host when <HINTS> gives one).
 - Every AND'd term multiplies the narrowing. Two strong signals (title + one rare skill + city) usually
   beat five. If a query would need more than ~4 AND'd groups, split it into two queries instead.
 
@@ -149,8 +154,8 @@ OUTPUT — raw JSON only, no markdown:
     "role_adjacent_terms": ["2–4 lower-case GitHub-bio words"],
     "discipline_terms": ["2–4 design disciplines, or the base title for non-design roles"],
     "seniority_term": "one headline word or null",
-    "location_terms": ["1–4 spellings of the city/region; empty when remote or none"],
-    "geo_tld": "country TLD like .de or .in, or empty string when unknown / multi-country",
+    "location_terms": ["1–4 spellings of the city/region from <HINTS>; empty when remote or none — never add a city the requisition does not name"],
+    "geo_tld": "the country TLD from <HINTS>, or empty string when unknown / multi-country",
     "required_phrases": ["0–2; alternatives joined with |"],
     "exclude_terms": ["only what the recruiter asked to avoid"]
   }
@@ -294,9 +299,9 @@ PHASES
 - scoping: required fields present, extended scope not yet covered. Ask about the uncovered extended fields
   (≤ 2 per turn). Do NOT re-ask anything in <STATE>.askedFields.
 - confirming: everything covered. Summarise the scope in one tight paragraph and ask for the go-ahead; offer the
-  options ["Build the queries", "Change something"]. Do not build.
+  options ["Find candidates", "Change something"]. Do not build.
 - ready: the recruiter has said go. Set confirms_build=true ONLY when <USER_MESSAGE> is an explicit go-ahead
-  ("build", "go ahead", "yes, proceed", "looks good", or the option text). Never infer consent from silence or
+  ("build", "go ahead", "yes, proceed", "looks good", "find candidates", "search now", or the option text). Never infer consent from silence or
   from a message that adds new information.
 
 RULES

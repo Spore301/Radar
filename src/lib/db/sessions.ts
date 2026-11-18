@@ -7,6 +7,7 @@ import {
   toCandidateProfile,
   toJob,
 } from './json';
+import type { Candidate as CandidateRow } from '@prisma/client';
 import {
   CandidateProfile,
   CandidateStatus,
@@ -22,7 +23,9 @@ import {
 import type { QueryRunResult, SearchStats, XRaySearchResult } from '../search/x-raySearchService';
 import { canonicalizeQueryString } from '../search/queryValidation';
 import { defaultFollowUpDays, isAtLeast } from '../pipeline/stages';
-import { deduplicateCandidates, findFuzzyDuplicate } from '../utils/deduplication';
+import { deduplicateCandidates, findFuzzyDuplicate, planLocationRefresh, type StoredLocationRow } from '../utils/deduplication';
+import { deriveCandidateFacets, isCandidateFacets } from '../search/facets';
+import { locationFitScore } from '../utils/scoring';
 
 // ---------------------------------------------------------------------------
 // Session repository.
@@ -45,6 +48,66 @@ import { deduplicateCandidates, findFuzzyDuplicate } from '../utils/deduplicatio
 /** Prisma Json columns reject `undefined` inside objects; round-tripping strips them. */
 function toJson<T>(value: T): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+// --- Candidate rows ↔ profiles ------------------------------------------------
+//
+// Facets (normalised location / current title / company / seniority) are
+// stored inside the existing rawScrapedData JSON column at index time — no
+// schema change. Rows indexed before facets existed get them derived on read
+// from the same evidence (URL with its subdomain, SERP title, snippet, stored
+// location), so every profile this module returns carries facets.
+
+/** A candidate row as a profile, with its facets attached. */
+function toProfile(row: CandidateRow): CandidateProfile {
+  const profile = toCandidateProfile(row);
+  const raw = (row.rawScrapedData ?? null) as Record<string, any> | null;
+  if (isCandidateFacets(raw?.facets)) return { ...profile, facets: raw.facets };
+  const facets = deriveCandidateFacets({
+    profile_url: row.profileUrl,
+    title: typeof raw?.serp_title === 'string' ? raw.serp_title : null,
+    snippet: row.summarySnippet,
+    location: row.location,
+    headline: row.headline,
+    extensions: Array.isArray(raw?.serp_extensions) ? raw.serp_extensions : null,
+    displayed_link: typeof raw?.displayed_link === 'string' ? raw.displayed_link : null,
+  });
+  return { ...profile, facets };
+}
+
+/**
+ * locationRefresh with the JSON conversion Prisma needs; the decision itself is
+ * planLocationRefresh. When the stored, more specific location is kept, the
+ * incoming score's location component (worked out from the less specific
+ * location) is redone against the kept one, so the card's location and its
+ * score always agree.
+ */
+function locationRefresh(
+  c: CandidateProfile,
+  stored: StoredLocationRow | undefined,
+  constraints: MergedConstraints | null
+): { location?: string; rawScrapedData?: Prisma.InputJsonValue; matchScore?: number; matchBreakdown?: Prisma.InputJsonValue } {
+  const plan = planLocationRefresh(c, stored);
+  const out: { location?: string; rawScrapedData?: Prisma.InputJsonValue; matchScore?: number; matchBreakdown?: Prisma.InputJsonValue } = {
+    ...(plan.location ? { location: plan.location } : {}),
+    ...(plan.raw ? { rawScrapedData: toJson(plan.raw) } : {}),
+  };
+  if (plan.kept && constraints && c.match_breakdown) {
+    const before = c.match_breakdown.location_score ?? 0;
+    const after = locationFitScore(plan.kept.facets, constraints, plan.kept.location);
+    if (after !== before) {
+      out.matchScore = Math.max(0, Math.min(100, c.match_score - before + after));
+      out.matchBreakdown = toJson({ ...c.match_breakdown, location_score: after });
+    }
+  }
+  return out;
+}
+
+/** The session's constraints, for re-scoring a refreshed row; null when unreadable. */
+async function sessionConstraints(jobId: string): Promise<MergedConstraints | null> {
+  const job = await prisma.job.findUnique({ where: { id: jobId }, select: { mergedConstraints: true } });
+  const mc = job?.mergedConstraints as unknown;
+  return mc && typeof mc === 'object' ? (mc as MergedConstraints) : null;
 }
 
 export function djb2(input: string): string {
@@ -151,7 +214,7 @@ export async function getSession(id: string, userId: string): Promise<SessionDet
     }),
   ]);
 
-  const candidates = candidateRows.map(toCandidateProfile);
+  const candidates = candidateRows.map(toProfile);
 
   let last_run: SessionDetail['last_run'] = null;
   if (lastRun) {
@@ -270,10 +333,23 @@ export async function persistRunCandidates(
   tier: 'free' | 'precision',
   candidates: CandidateProfile[]
 ): Promise<CandidateProfile[]> {
+  // What the session already holds for these profiles, so a refresh never
+  // downgrades a location (see locationRefresh).
+  const keys = candidates.map(candidateKey);
+  const existing = keys.length
+    ? await prisma.candidate.findMany({
+        where: { jobId, profileUrlCanonical: { in: keys } },
+        select: { profileUrlCanonical: true, profileUrl: true, location: true, rawScrapedData: true },
+      })
+    : [];
+  const storedByKey = new Map(existing.map((r) => [r.profileUrlCanonical, r]));
+  const constraints = existing.length ? await sessionConstraints(jobId) : null;
+
   // Upsert every indexed profile. Batched into one transaction so a half-
   // written run can't leave the session with a partial candidate list.
   await prisma.$transaction(
     candidates.map((c) => {
+      const refresh = locationRefresh(c, storedByKey.get(candidateKey(c)), constraints);
       const scraped = {
         name: c.name,
         headline: c.headline,
@@ -304,8 +380,13 @@ export async function persistRunCandidates(
           status: 'New',
           discoveredAt: new Date(c.discovered_at),
         },
-        // Location is only overwritten when the new run actually found one.
-        update: c.location && !/not specified/i.test(c.location) ? { ...scraped, location: c.location } : scraped,
+        // Location is only overwritten by an equally or more specific one; facets likewise.
+        update: {
+          ...scraped,
+          rawScrapedData: refresh.rawScrapedData,
+          ...(refresh.location ? { location: refresh.location } : {}),
+          ...(refresh.matchScore !== undefined ? { matchScore: refresh.matchScore, matchBreakdown: refresh.matchBreakdown } : {}),
+        },
       });
     })
   );
@@ -314,7 +395,7 @@ export async function persistRunCandidates(
   await prisma.job.update({ where: { id: jobId }, data: { status: 'complete', candidateCount: total } });
 
   const rows = await prisma.candidate.findMany({ where: { jobId }, orderBy: [{ matchScore: 'desc' }, { name: 'asc' }] });
-  return rows.map(toCandidateProfile);
+  return rows.map(toProfile);
 }
 
 /**
@@ -340,10 +421,12 @@ export async function persistQueryCandidates(
   const batch = deduplicateCandidates(candidates);
   const stored = await prisma.candidate.findMany({
     where: { jobId },
-    select: { id: true, name: true, location: true, profileUrlCanonical: true, skillsDetected: true, matchScore: true },
+    select: { id: true, name: true, location: true, profileUrl: true, profileUrlCanonical: true, skillsDetected: true, matchScore: true, rawScrapedData: true },
   });
   const byCanonical = new Set(stored.map((s) => s.profileUrlCanonical));
+  const storedByKey = new Map(stored.map((s) => [s.profileUrlCanonical, s]));
   const pool = stored.map((s) => ({ ...s, skills: Array.isArray(s.skillsDetected) ? (s.skillsDetected as string[]) : [] }));
+  const constraints = stored.length ? await sessionConstraints(jobId) : null;
 
   let created = 0;
   const writes: Prisma.PrismaPromise<unknown>[] = [];
@@ -405,7 +488,15 @@ export async function persistQueryCandidates(
           status: 'New',
           discoveredAt: new Date(c.discovered_at),
         },
-        update: c.location && !/not specified/i.test(c.location) ? { ...scraped, location: c.location } : scraped,
+        update: (() => {
+          const refresh = locationRefresh(c, storedByKey.get(key), constraints);
+          return {
+            ...scraped,
+            rawScrapedData: refresh.rawScrapedData,
+            ...(refresh.location ? { location: refresh.location } : {}),
+            ...(refresh.matchScore !== undefined ? { matchScore: refresh.matchScore, matchBreakdown: refresh.matchBreakdown } : {}),
+          };
+        })(),
       })
     );
   }
@@ -419,7 +510,7 @@ export async function recordSearchRun(
   result: XRaySearchResult,
   resultsCap: number
 ): Promise<{ runId: string; candidates: CandidateProfile[] }> {
-  const usedSerpApi = result.queryResults.some((q) => q.provider === 'serpapi');
+  const usedSerpApi = result.queryResults.some((q) => q.provider === 'serpapi' || q.provider === 'serper');
   const tier = usedSerpApi ? 'precision' : 'free';
   const anyCompleted = result.queryResults.some((q) => q.status === 'completed');
   const allCompleted = result.queryResults.every((q) => q.status === 'completed');
@@ -500,7 +591,7 @@ export async function updateCandidate(id: string, userId: string, patch: Candida
       lastUpdatedById: userId ?? undefined,
     },
   });
-  return toCandidateProfile(row);
+  return toProfile(row);
 }
 
 /**
@@ -558,7 +649,7 @@ export async function logOutreach(
       },
     }),
   ]);
-  return toCandidateProfile(row);
+  return toProfile(row);
 }
 
 /** Every outreach logged against a candidate, newest first — the drawer's activity timeline. */
@@ -597,5 +688,5 @@ export async function listCandidates(userId: string, filter: CandidateListFilter
     orderBy: [{ updatedAt: 'desc' }],
     include: { job: { select: { title: true } } },
   });
-  return rows.map((row) => ({ ...toCandidateProfile(row), job_title: row.job.title }));
+  return rows.map((row) => ({ ...toProfile(row), job_title: row.job.title }));
 }

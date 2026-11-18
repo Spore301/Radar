@@ -1,8 +1,10 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import { djb2 } from './sessions';
 import { canonicalizeQueryString } from '../search/queryValidation';
 import { RUN_HEARTBEAT_TIMEOUT_MS, type RunLifecycle, type RunQueryOutcome, type RunSnapshot } from '../search/runTypes';
 import type { QueryRunResult } from '../search/x-raySearchService';
+import type { DeadProvider } from '../search/providers/runState';
 import type { MergedConstraints, XRayQuery } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -24,8 +26,16 @@ import type { MergedConstraints, XRayQuery } from '../types';
 export interface RunConfig {
   maxPagesPerQuery: number;
   engine: string;
-  /** SerpAPI `gl` country code for location-bound roles; '' when remote / unknown. */
+  /** Google `gl` country code; '' when remote with no country / unknown. */
   gl: string;
+  /** Google interface language. */
+  hl: string;
+  /** Google domain for the country ('google.co.in'); '' = default. */
+  googleDomain: string;
+  /** Canonical Google location for a city-bound role ('Bengaluru,Karnataka,India'); '' otherwise. */
+  location: string;
+  /** Providers this run found unusable (no credits, hourly cap, bad key) — not retried after a resume. */
+  exhausted: Partial<Record<'serpapi' | 'serper', DeadProvider>>;
   /** How many times a worker has picked this run up after the first. */
   resumes: number;
 }
@@ -56,7 +66,7 @@ export async function createRunRow(input: {
       resultsCap: input.resultsCap,
       queriesTotal: input.queries.length,
       queriesDone: blocked.size,
-      estimate: { ...input.config, resumes: 0 },
+      estimate: { ...input.config, resumes: 0 } as unknown as Prisma.InputJsonValue,
       startedById: input.userId ?? undefined,
       heartbeatAt: new Date(),
       queries: {
@@ -159,6 +169,10 @@ export async function loadRunWork(runId: string): Promise<RunWork | null> {
       maxPagesPerQuery: typeof raw.maxPagesPerQuery === 'number' ? raw.maxPagesPerQuery : 5,
       engine: typeof raw.engine === 'string' ? raw.engine : 'google',
       gl: typeof raw.gl === 'string' ? raw.gl : '',
+      hl: typeof raw.hl === 'string' && raw.hl ? raw.hl : 'en',
+      googleDomain: typeof raw.googleDomain === 'string' ? raw.googleDomain : '',
+      location: typeof raw.location === 'string' ? raw.location : '',
+      exhausted: parseExhausted(raw.exhausted),
       resumes: typeof raw.resumes === 'number' ? raw.resumes : 0,
     },
     constraints: run.job.mergedConstraints as unknown as MergedConstraints,
@@ -173,8 +187,39 @@ export async function loadRunWork(runId: string): Promise<RunWork | null> {
   };
 }
 
+function parseExhausted(raw: unknown): RunConfig['exhausted'] {
+  const out: RunConfig['exhausted'] = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const id of ['serpapi', 'serper'] as const) {
+    const v = (raw as Record<string, any>)[id];
+    if (v && typeof v.kind === 'string' && typeof v.message === 'string') out[id] = { kind: v.kind, message: v.message };
+  }
+  return out;
+}
+
 export async function recordResume(runId: string, config: RunConfig): Promise<void> {
-  await prisma.searchRun.update({ where: { id: runId }, data: { estimate: { ...config, resumes: config.resumes + 1 } } });
+  await prisma.searchRun.update({ where: { id: runId }, data: { estimate: { ...config, resumes: config.resumes + 1 } as unknown as Prisma.InputJsonValue } });
+}
+
+/**
+ * Remembers that a provider is unusable for the rest of this run, so a
+ * resumed worker does not spend a call rediscovering it. Read-modify-write of
+ * the run's frozen config (SearchRun.estimate); workers of one run are
+ * serialised by the lease, so there is no concurrent writer.
+ */
+export async function recordExhaustedProvider(runId: string, provider: 'serpapi' | 'serper', kind: string, message: string): Promise<void> {
+  const row = await prisma.searchRun.findUnique({ where: { id: runId }, select: { estimate: true } });
+  const raw = (row?.estimate ?? {}) as Record<string, unknown>;
+  const exhausted = { ...parseExhausted(raw.exhausted), [provider]: { kind, message } };
+  await prisma.searchRun.update({ where: { id: runId }, data: { estimate: { ...raw, exhausted } as unknown as Prisma.InputJsonValue } });
+}
+
+/** Closes out every still-pending query of a run as skipped, with the reason. */
+export async function skipPendingQueries(runId: string, message: string, code?: string | null): Promise<void> {
+  await prisma.searchRunQuery.updateMany({
+    where: { runId, outcome: 'pending' },
+    data: { outcome: 'skipped', errorMessage: message.slice(0, 500), errorCode: code ?? null, finishedAt: new Date() },
+  });
 }
 
 /** Marks one query as in flight and refreshes the run's heartbeat. */
@@ -205,6 +250,13 @@ export async function markQueryDone(runId: string, result: QueryRunResult): Prom
       resultCount: result.resultCount,
       keptCount: result.indexedCount,
       errorMessage: result.error ?? result.notice ?? null,
+      // 'relaxed' | 'fallback' | a provider error kind — the machine-readable half of errorMessage.
+      errorCode: result.code ?? null,
+      ...(typeof result.latencyMs === 'number' ? { latencyMs: Math.round(result.latencyMs) } : {}),
+      // The receipt shows the string that actually ran. After a zero-result
+      // relaxation that is the relaxed string; the approved one stays in the
+      // session's bundle and in the notice.
+      ...(result.ranQuery ? { queryString: result.ranQuery, canonicalHash: djb2(canonicalizeQueryString(result.ranQuery)) } : {}),
       finishedAt: new Date(),
     },
   });
@@ -235,7 +287,7 @@ export async function markStage(runId: string, stage: string, statusText: string
  * query by query (persistQueryCandidates), so this only totals the receipt,
  * settles the run's status and the session's counters.
  */
-export async function finalizeRun(runId: string, jobId: string): Promise<{ candidateCount: number }> {
+export async function finalizeRun(runId: string, jobId: string, haltReason?: string | null, note?: string | null): Promise<{ candidateCount: number }> {
   const queries = await prisma.searchRunQuery.findMany({ where: { runId }, select: { outcome: true, provider: true, keptCount: true, creditCost: true } });
   const run = await prisma.searchRun.findUnique({ where: { id: runId }, select: { abortRequested: true } });
   const completed = queries.filter((q) => q.outcome === 'fetched' || q.outcome === 'cache_hit').length;
@@ -246,7 +298,7 @@ export async function finalizeRun(runId: string, jobId: string): Promise<{ candi
       : completed > 0
         ? 'partial'
         : 'failed';
-  const tier: 'free' | 'precision' = queries.some((q) => q.provider === 'serpapi') ? 'precision' : 'free';
+  const tier: 'free' | 'precision' = queries.some((q) => q.provider === 'serpapi' || q.provider === 'serper') ? 'precision' : 'free';
   const indexed = queries.reduce((s, q) => s + q.keptCount, 0);
   const credits = queries.reduce((s, q) => s + q.creditCost, 0);
   const [fromRun, total] = await Promise.all([
@@ -255,18 +307,26 @@ export async function finalizeRun(runId: string, jobId: string): Promise<{ candi
   ]);
 
   await prisma.job.update({ where: { id: jobId }, data: { status: completed > 0 || total > 0 ? 'complete' : 'draft', candidateCount: total } });
+  const counts = `${completed} of ${queries.length} queries · ${indexed} indexed · ${fromRun} stored`;
+  const statusText =
+    status === 'aborted'
+      ? `Stopped. ${fromRun} ${fromRun === 1 ? 'profile' : 'profiles'} found before stopping were saved.`
+      : haltReason
+        ? // The halt reason leads: it is the one thing the recruiter must act on.
+          `${haltReason} ${counts}`
+        : status === 'failed'
+          ? 'Every query failed — no profiles stored.'
+          : note
+            ? `${counts} · ${note}`
+            : counts;
   await prisma.searchRun.update({
     where: { id: runId },
     data: {
       tier,
       status,
       stage: 'done',
-      statusText:
-        status === 'aborted'
-          ? `Stopped. ${fromRun} ${fromRun === 1 ? 'profile' : 'profiles'} found before stopping were saved.`
-          : status === 'failed'
-            ? 'Every query failed — no profiles stored.'
-            : `${completed} of ${queries.length} queries · ${indexed} indexed · ${fromRun} stored`,
+      statusText: statusText.slice(0, 500),
+      ...(haltReason ? { errorMessage: haltReason.slice(0, 500), errorCode: 'provider_unavailable' } : {}),
       creditsCommitted: credits,
       queriesDone: queries.length,
       rawResultCount: indexed,
@@ -332,7 +392,20 @@ const RUN_SELECT = {
   errorMessage: true,
   job: { select: { title: true } },
   queries: {
-    select: { queryId: true, platform: true, queryType: true, outcome: true, resultCount: true, keptCount: true, creditCost: true, errorMessage: true, startedAt: true, finishedAt: true },
+    select: {
+      queryId: true,
+      platform: true,
+      queryType: true,
+      outcome: true,
+      provider: true,
+      resultCount: true,
+      keptCount: true,
+      creditCost: true,
+      errorMessage: true,
+      errorCode: true,
+      startedAt: true,
+      finishedAt: true,
+    },
   },
 } as const;
 
@@ -361,6 +434,8 @@ type RunRow = {
     keptCount: number;
     creditCost: number;
     errorMessage: string | null;
+    errorCode: string | null;
+    provider: string | null;
     startedAt: Date | null;
     finishedAt: Date | null;
   }>;
@@ -399,6 +474,8 @@ function toSnapshot(row: RunRow): RunSnapshot {
       keptCount: q.keptCount,
       creditCost: q.creditCost,
       error: q.errorMessage,
+      code: q.errorCode,
+      provider: q.provider,
     })),
   };
 }

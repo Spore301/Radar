@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/session';
 import { getSession } from '@/lib/db/sessions';
 import { listRunSnapshots } from '@/lib/db/searchRuns';
-import { getProviderKey } from '@/lib/credentials';
+import { checkSearchKey, resolveSearchKeys } from '@/lib/credentials';
+import { providerChain, providerLabel } from '@/lib/search/providers';
 import { resumeStalledRuns, startSearchRun } from '@/lib/search/runManager';
 
 export const dynamic = 'force-dynamic';
@@ -38,12 +39,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
   }
 
-  // The recruiter's own SerpAPI key (stored encrypted at onboarding / Settings)
-  // pays for this run; the platform key is only a fallback. Refusing up front
-  // beats nine queries that each silently return nothing.
-  const serpapi = (await getProviderKey(session!.user.id, 'serpapi')) ?? process.env.SERPAPI_KEY ?? null;
-  if (!serpapi) {
-    return NextResponse.json({ error: 'No SerpAPI key on file. Add one in Settings before running a search.' }, { status: 400 });
+  // The recruiter's own search keys (SerpAPI and/or Serper, stored encrypted
+  // at onboarding / Settings) pay for this run; the platform keys are used
+  // only when the recruiter has none. Refusing up front beats nine queries
+  // that each silently return nothing.
+  const keys = await resolveSearchKeys(session!.user.id);
+  const chain = providerChain(keys);
+  if (chain.length === 0) {
+    return NextResponse.json(
+      { error: 'No SerpAPI key on file, and no Serper key either. Add one of them in Settings before running a search.', code: 'NO_SEARCH_KEY' },
+      { status: 400 }
+    );
+  }
+
+  // Free pre-flight (account endpoints cost no credit). An account with
+  // nothing left (no searches this month, or the hourly cap used up) cannot
+  // run anything: when every key is like that, refuse with the reason. A key
+  // the provider REJECTS is different: the run starts and is closed out at
+  // once, so the receipt records the rejection on every query (the contract
+  // scripts/e2e.ts checks); with a second, working key it is simply skipped.
+  const checks = await Promise.all(chain.map(async (id) => ({ id, ...(await checkSearchKey(id, keys[id]!)) })));
+  const empty = checks.filter((c) => !c.usable && c.kind !== 'auth');
+  if (empty.length === checks.length) {
+    const reasons = empty.map((c) => c.reason ?? `${providerLabel(c.id)} has nothing left.`).join(' ');
+    return NextResponse.json(
+      { error: `No usable search key: ${reasons} Add searches or another key in Settings, then try again.`, code: 'NO_USABLE_SEARCH_KEY' },
+      { status: 400 }
+    );
   }
 
   try {
@@ -52,7 +74,16 @@ export async function POST(req: NextRequest) {
       userId: session!.user.id,
       constraints,
       queries,
-      keys: { serpapi, deepseek: apiKeys?.deepseek ?? null },
+      keys: { serpapi: keys.serpapi, serper: keys.serper, deepseek: apiKeys?.deepseek ?? null },
+      // With a working key alongside, an unusable one is marked dead on the
+      // run (remembered across resumes) and never called. When no key passed
+      // the check, nothing is pre-marked: the first query records the
+      // provider's own rejection on its receipt row and the run halts there.
+      unusableProviders: checks.some((c) => c.usable)
+        ? Object.fromEntries(
+            checks.filter((c) => !c.usable).map((c) => [c.id, { kind: c.kind ?? 'out_of_credits', message: c.reason ?? `${providerLabel(c.id)} is not usable.` }])
+          )
+        : {},
       serpOptions,
     });
     return NextResponse.json({ runId, queriesTotal: queries.length }, { status: 202 });

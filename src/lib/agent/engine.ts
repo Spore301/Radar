@@ -1,6 +1,6 @@
 import { prisma } from '../db/client';
 import { createSession, getSession, updateSession } from '../db/sessions';
-import { callDeepSeekAPI, generateQueriesWithDeepSeek, heuristicParseJD, looksLikeJobDescription, sanitizeSelectedPlatforms, defaultPlatformsForRole } from '../ai/client';
+import { callDeepSeekAPI, generateQueryBundleForConstraints, heuristicParseJD, looksLikeJobDescription, sanitizeSelectedPlatforms, defaultPlatformsForRole } from '../ai/client';
 import { AGENT_SYSTEM_PROMPT } from '../ai/prompts';
 import { parseLocation } from '../search/location';
 import { isSoftSkill } from '../search/xrayTemplates';
@@ -26,6 +26,10 @@ import type { AgentField, AgentMessage, AgentModelOutput, AgentPhase, AgentQuest
 //   confirming → everything covered; the agent summarises and asks for a
 //                go-ahead
 //   ready      → the recruiter explicitly confirmed; queries are generated
+//                (instantly, from the approved templates — the same function
+//                the chat uses to show the credit ceiling with the go-ahead
+//                question, so the search the client then starts is held to
+//                the number the recruiter saw)
 //
 // The model supplies extraction, wording and its own read of the phase; the
 // engine merges, decides the phase, and can only move a model's read
@@ -71,7 +75,9 @@ const EMPTY: MergedConstraints = {
 
 const uniq = (xs: string[]) => Array.from(new Map(xs.map((x) => [x.trim().toLowerCase(), x.trim()])).values()).filter(Boolean);
 
-const CONFIRM_RE = /^\s*(yes|yep|yeah|ok(ay)?|sure|go ahead|proceed|build( the queries| it| them)?|do it|looks good|lgtm|confirm(ed)?|start( the search)?|run it|let'?s go)\b[.!\s]*$/i;
+const CONFIRM_RE = /^\s*(yes|yep|yeah|ok(ay)?|sure|go ahead|proceed|build( the queries| it| them)?|do it|looks good|lgtm|confirm(ed)?|start( the search)?|search( now)?|find( the)? candidates|run it|let'?s go)\b[.!\s]*$/i;
+/** The go-ahead question's id. A reply to it is consent or a change request, never a value for a scope field. */
+const CONFIRM_QUESTION_ID = 'q-confirm';
 const DECLINE_RE = /^\s*(none|no|nothing( else| more)?|n\/a|skip|not (applicable|needed)|any|doesn'?t matter|no preference|default(s)?( are fine)?|that'?s all|nope)\b[.!\s]*$/i;
 
 // --- merging ------------------------------------------------------------------
@@ -152,7 +158,7 @@ function scopeSummary(c: MergedConstraints): string {
     c.additional_details?.trim() ? `with: ${c.additional_details.trim().replace(/\n/g, '; ')}` : 'no extra exclusions',
     `across ${c.selected_platforms.map(platformLabel).join(', ')}`,
   ].filter(Boolean);
-  return `Here is the full scope: ${bits.join(' · ')}. Each query costs search credits, so I have not built anything yet — shall I build the queries now?`;
+  return `Here is the full scope: ${bits.join(' · ')}. Each query costs search credits, so nothing has been searched yet. The credit ceiling is shown below; shall I start the search?`;
 }
 
 // --- interpreting a reply against what was asked -----------------------------------
@@ -231,7 +237,8 @@ function heuristicTurn(prev: MergedConstraints, userText: string, jdText: string
   const c = heuristicParseJD(padded).merged_constraints;
   return {
     ...(c.job_title ? { job_title: c.job_title } : {}),
-    role_type: c.role_type,
+    // 'Other' is the parser's "found nothing": a one-word reply ("yes") must not reset a known role type.
+    ...(c.role_type !== 'Other' ? { role_type: c.role_type } : {}),
     ...(c.seniority !== 'Any' ? { seniority: c.seniority } : {}),
     ...(c.location ? { location: c.location } : {}),
     ...(c.remote_eligible ? { remote_eligible: true } : {}),
@@ -313,7 +320,9 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
 
   // What did we ask last time? A reply to it counts as covering that field.
   const lastAssistant = [...transcript].reverse().find((m) => m.role === 'assistant');
-  const lastAsked = (lastAssistant?.questions ?? []).map((q) => q.field);
+  // The go-ahead question is excluded: its answer ("Find candidates", "Change
+  // something") used to be appended to additional_details as if it were scope.
+  const lastAsked = (lastAssistant?.questions ?? []).filter((q) => q.id !== CONFIRM_QUESTION_ID).map((q) => q.field);
   const wasConfirming = lastAssistant?.phase === 'confirming';
 
   // --- deterministic read of the reply, then the model ------------------------------
@@ -371,7 +380,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
     questions = modelQs.length ? modelQs : fields.map((f) => questionFor(f, constraints));
     reply = out?.reply && (out.phase === 'scoping' || out.phase === 'gathering') ? out.reply : `Required details are in. Before I spend credits on a search, a bit more scope:`;
   } else if (phase === 'confirming') {
-    questions = [{ id: 'q-confirm', field: 'additional_details', text: 'Shall I build the queries now?', options: ['Build the queries', 'Change something'] }];
+    questions = [{ id: CONFIRM_QUESTION_ID, field: 'additional_details', text: 'Shall I start the search now?', options: ['Find candidates', 'Change something'] }];
     reply = scopeSummary(constraints);
   }
 
@@ -379,8 +388,11 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<AgentTurnResp
   let queries: XRayQuery[] = [];
   if (ready) {
     onStage?.('queries', 'Scope confirmed — filling the approved X-Ray templates…');
-    queries = await generateQueriesWithDeepSeek(constraints, apiKey ?? undefined);
-    reply = `Scope confirmed. ${queries.length} queries are ready to review across ${constraints.selected_platforms.map(platformLabel).join(', ')}. Nothing has been searched yet — review them, then run.`;
+    // Instant and deterministic: no model call between the go-ahead and the
+    // search. The reasoning-model planner stays available on demand in the
+    // query review ("Improve with AI").
+    queries = generateQueryBundleForConstraints(constraints);
+    reply = `Scope confirmed. Built ${queries.length} ${queries.length === 1 ? 'query' : 'queries'} across ${constraints.selected_platforms.map(platformLabel).join(', ')}, each searched individually.`;
   }
 
   // --- reasoning trace: guardrail first, always ---------------------------------------------

@@ -1,18 +1,36 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, Plus, AlertTriangle } from 'lucide-react';
-import { StructuredJD, MergedConstraints, CandidatePlatform, SeniorityLevel } from '@/lib/types';
+import { StructuredJD, MergedConstraints, CandidatePlatform, SeniorityLevel, XRayQuery } from '@/lib/types';
 import { PLATFORMS } from '@/lib/search/platforms';
 import { TEMPLATES_BY_PLATFORM, isSoftSkill } from '@/lib/search/xrayTemplates';
+import { generateQueryBundleForConstraints } from '@/lib/ai/client';
 import { PlatformLogo } from '@/components/platforms/PlatformLogo';
+import { CreditLine, DepthSelect, searchBudget } from './SearchBudget';
 
 interface ConstraintsFormProps {
   structuredJD: StructuredJD;
   initialConstraints: MergedConstraints;
-  onSubmit: (updatedConstraints: MergedConstraints) => void;
+  /**
+   * The session's stored bundle. Reused while the constraints are unchanged
+   * and it holds recruiter edits or an AI plan, so that work is never thrown
+   * away by a click on Find candidates; otherwise the bundle is rebuilt from
+   * the form, instantly and deterministically.
+   */
+  savedQueries: XRayQuery[];
+  /** Pages per query; owned by the page and remembered per browser. */
+  depth: number;
+  onDepthChange: (depth: number) => void;
+  /** review=false searches straight away; review=true opens the query review first. */
+  onSearch: (constraints: MergedConstraints, queries: XRayQuery[], opts: { review: boolean }) => void;
   isLoading: boolean;
+  /** Why searching is unavailable right now (e.g. a search for this session is still running). */
+  disabledReason?: string | null;
 }
+
+/** A bundle the recruiter shaped by hand or with the planner: worth keeping while the constraints stand. */
+const isCuratedBundle = (qs: XRayQuery[]) => qs.some((q) => q.is_edited || q.query_type === 'custom' || q.query_type.startsWith('ai_'));
 
 function TagInput({ values, onChange, placeholder }: { values: string[]; onChange: (next: string[]) => void; placeholder: string }) {
   const [draft, setDraft] = useState('');
@@ -52,7 +70,7 @@ function TagInput({ values, onChange, placeholder }: { values: string[]; onChang
   );
 }
 
-export function ConstraintsForm({ structuredJD, initialConstraints, onSubmit, isLoading }: ConstraintsFormProps) {
+export function ConstraintsForm({ structuredJD, initialConstraints, savedQueries, depth, onDepthChange, onSearch, isLoading, disabledReason }: ConstraintsFormProps) {
   const [c, setC] = useState<MergedConstraints>(initialConstraints);
 
   const togglePlatform = (id: CandidatePlatform) =>
@@ -63,23 +81,54 @@ export function ConstraintsForm({ structuredJD, initialConstraints, onSubmit, is
 
   const queryCount = c.selected_platforms.reduce((n, p) => n + TEMPLATES_BY_PLATFORM[p].length, 0);
   const lowSeniorityConfidence = structuredJD.confidence_scores.seniority < 0.7;
+  const noPlatforms = c.selected_platforms.length === 0;
+
+  // The exact bundle Find candidates will search, rebuilt as the form changes.
+  // Pure template filling, no model call, so the credit line is always live.
+  const unchanged = useMemo(() => JSON.stringify(c) === JSON.stringify(initialConstraints), [c, initialConstraints]);
+  const curated = savedQueries.length > 0 && isCuratedBundle(savedQueries);
+  const bundle = useMemo(() => (unchanged && curated ? savedQueries : generateQueryBundleForConstraints(c)), [unchanged, curated, savedQueries, c]);
+  const budget = useMemo(() => searchBudget(bundle, c, depth), [bundle, c, depth]);
+  const blocked = isLoading || noPlatforms || Boolean(disabledReason);
 
   return (
     <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit(c);
-      }}
+      // Consent before spend: only an explicit click on Find candidates searches.
+      // Enter in a field (implicit submit) must never start a paid run.
+      onSubmit={(e) => e.preventDefault()}
       className="card"
     >
-      <div className="px-5 py-4 border-b border-hairline flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-label-sm text-ink">Search constraints</h2>
-          <p className="text-body-sm text-mute mt-0.5">Extracted from the job description. Adjust anything before the queries are generated.</p>
+      <div className="px-5 py-4 border-b border-hairline">
+        <h2 className="text-label-sm text-ink">Search constraints</h2>
+        <p className="text-body-sm text-mute mt-0.5">Extracted from the job description. Adjust anything, then find candidates. The queries are built from these fields as you edit.</p>
+      </div>
+
+      {/* Action bar: pinned to the top of the viewport while the form is on screen, so the
+          ceiling is in view at the click. Top, not bottom: the run popup owns the bottom-right corner. */}
+      <div className="sticky top-0 z-10 border-b border-hairline bg-canvas px-5 py-3 flex flex-col gap-1.5" data-search-actions>
+        <div className="flex items-center gap-3 flex-wrap">
+          <DepthSelect depth={depth} onChange={onDepthChange} disabled={isLoading} />
+          {noPlatforms ? <span className="text-body-xs text-warning-deep">Select at least one platform.</span> : <CreditLine budget={budget} />}
+          <div className="ml-auto flex items-center gap-2">
+            <button type="button" onClick={() => onSearch(c, bundle, { review: true })} disabled={isLoading || noPlatforms} className="btn-ghost">
+              Review queries
+            </button>
+            <button type="button" onClick={() => onSearch(c, bundle, { review: false })} disabled={blocked || budget.runnable === 0} className="btn-primary">
+              Find candidates
+            </button>
+          </div>
         </div>
-        <button type="submit" disabled={isLoading || c.selected_platforms.length === 0} className="btn-primary">
-          Generate {queryCount} {queryCount === 1 ? 'query' : 'queries'}
-        </button>
+        {(disabledReason || (!noPlatforms && budget.runnable === 0) || curated) && (
+          <p className="text-body-xs text-mute">
+            {disabledReason
+              ? disabledReason
+              : !noPlatforms && budget.runnable === 0
+                ? `No query can run: ${budget.firstSkipReason ?? 'every query fails validation'}. Adjust the constraints or review the queries.`
+                : unchanged
+                  ? `Searches your ${savedQueries.length} saved queries, including your edits or the AI plan. Change a constraint to rebuild them from the templates.`
+                  : 'Constraints changed, so the queries are rebuilt from the templates. Your earlier edits or AI plan will be replaced.'}
+          </p>
+        )}
       </div>
 
       {structuredJD.extraction_warnings.length > 0 && (

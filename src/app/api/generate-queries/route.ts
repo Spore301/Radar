@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { planQueries } from '@/lib/ai/client';
 import { requireSession } from '@/lib/session';
 
-// The reasoning model thinks before it plans; give it room.
+// The planner writes a long answer; give it room.
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
 
     const customKey = clientApiKey || req.headers.get('x-deepseek-api-key') || process.env.DEEPSEEK_API_KEY;
 
-    // The reasoning model plans the bundle; every query is validated before it is returned.
+    // DeepSeek plans the bundle; every query is validated before it is returned.
     const { queries, analysis, report } = await planQueries(constraints, customKey);
 
     return NextResponse.json({
