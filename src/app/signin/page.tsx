@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { RadrLogo } from '@/components/brand/RadrLogo';
 import { signIn } from '@/lib/auth';
 
@@ -40,6 +41,14 @@ export default async function SignInPage({
             Continue with Google
           </button>
         </form>
+
+        <p className="text-body-xs text-mute leading-relaxed">
+          RADR. is a product in testing. By continuing you agree to the{' '}
+          <Link href="/terms" className="underline underline-offset-2 hover:text-ink">
+            Terms of Use
+          </Link>
+          , including that the creator is not liable for loss of data.
+        </p>
       </div>
     </div>
   );

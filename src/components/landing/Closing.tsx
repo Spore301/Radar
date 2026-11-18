@@ -54,6 +54,9 @@ export function Closing() {
             <a href="#features" className="hover:text-ink transition-colors">
               Features
             </a>
+            <Link href="/terms" className="hover:text-ink transition-colors">
+              Terms
+            </Link>
             <Link href="/signin" className="hover:text-ink transition-colors">
               Sign in
             </Link>

@@ -29,6 +29,13 @@ interface PlaywrightModule {
 
 let browserInstance: HeadlessBrowser | null = null;
 let browserLaunchPromise: Promise<HeadlessBrowser> | null = null;
+/**
+ * Set once a launch fails because no browser binary exists (the production
+ * image ships none). Every later call then returns "no results" immediately
+ * instead of re-attempting the launch and printing Playwright's multi-line
+ * install banner into the log for each query that fell back here.
+ */
+let browserUnavailable = false;
 let idleCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 const BROWSER_IDLE_MS = 5 * 60 * 1000;
@@ -75,6 +82,8 @@ async function getBrowserInstance(): Promise<HeadlessBrowser> {
     scheduleIdleClose();
     return browserInstance;
   }
+
+  if (browserUnavailable) throw new Error('Headless browser not installed on this host');
 
   if (!browserLaunchPromise) {
     browserLaunchPromise = (async () => {
@@ -183,8 +192,16 @@ export async function executePlaywrightXRaySearch(
       ddgItems.forEach((item, idx) => results.push({ ...item, position: idx + 1 }));
       if (results.length > 0) provider = 'duckduckgo-headless';
     }
-  } catch (err) {
-    console.error('Playwright headless SERP error:', err);
+  } catch (err: any) {
+    const message = String(err?.message ?? err);
+    if (/Executable doesn't exist|not installed on this host|browserType\.launch/i.test(message)) {
+      if (!browserUnavailable) {
+        browserUnavailable = true;
+        console.warn('Headless SERP fallback disabled: no browser is installed on this host. Queries that SerpAPI cannot answer will be reported as failed.');
+      }
+    } else {
+      console.error('Playwright headless SERP error:', err);
+    }
   } finally {
     // Always close the context, even if `goto`/`evaluate` threw above — this used
     // to leak a browser context (and its process memory) on every failed search.

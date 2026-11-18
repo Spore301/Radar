@@ -72,7 +72,10 @@ const DEMO_CONSTRAINTS: MergedConstraints = {
   domain: ['SaaS / B2B'],
   education: 'Bachelor in Design or Equivalent',
   selected_platforms: ['LinkedIn', 'Behance', 'Dribbble', 'Wellfound', 'Resumes'],
-  additional_details: 'Must have shipped a "design system" for a B2B SaaS product. No agencies, no freelancers, no students.',
+  // Shows the required-phrase grounding only. It deliberately names nothing
+  // to exclude: every -term here would be negated in all nine demo queries and
+  // read, to anyone watching the demo, as a default the product imposes.
+  additional_details: 'Must have shipped a "design system" for a B2B SaaS product.',
   results_cap: 50,
 };
 

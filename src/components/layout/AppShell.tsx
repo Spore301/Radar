@@ -121,6 +121,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="hidden lg:block flex-1" />
 
+        <Link href="/terms" className="hidden lg:block px-5 pb-2 text-body-xs text-mute hover:text-ink transition-colors">
+          Terms of Use · product in testing
+        </Link>
+
         <div className="hidden lg:flex items-center gap-2.5 px-3 py-3 border-t border-hairline">
           <Avatar name={displayName} src={user?.image} size={28} />
           <div className="min-w-0 flex-1 leading-tight">
